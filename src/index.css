@@ -1,0 +1,385 @@
+/* =========================================
+   Tailwind (v4)
+========================================= */
+@import "tailwindcss";
+
+/* =========================================
+   Fonts
+========================================= */
+
+/* Courier New (family-unified) */
+@font-face {
+  font-family: 'Courier New';
+  src: url('/fonts/CourierNew-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Courier New';
+  src: url('/fonts/CourierNew-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Courier New';
+  src: url('/fonts/CourierNew-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Courier New';
+  src: url('/fonts/CourierNew-BoldItalic.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Chanticleer (fixed name) */
+@font-face {
+  font-family: 'ChanticleerRomanNF';
+  src: url('/fonts/ChanticleerRomanNF.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'ChanticleerRomanNF';
+  src: url('/fonts/ChanticleerRomanNF-Bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Playfair */
+@font-face {
+  font-family: 'PlayfairDisplay';
+  src: url('/fonts/PlayfairDisplay-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'PlayfairDisplay';
+  src: url('/fonts/PlayfairDisplay-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'PlayfairDisplay';
+  src: url('/fonts/PlayfairDisplay-Italic.ttf') format('truetype');
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'PlayfairDisplay';
+  src: url('/fonts/PlayfairDisplay-BoldItalic.ttf') format('truetype');
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Red Hat Mono */
+@font-face {
+  font-family: 'RedHatMono';
+  src: url('/fonts/RedHatMono-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Theano */
+@font-face {
+  font-family: 'TheanoDidot';
+  src: url('/fonts/TheanoDidot-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'TheanoOldStyle';
+  src: url('/fonts/TheanoOldStyle-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Petrona */
+@font-face {
+  font-family: 'Petrona';
+  src: url('/fonts/Petrona-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* =========================================
+   Variables & Base Theme
+========================================= */
+
+:root {
+  --interface-font: 'Courier New', monospace;
+  --body-font: 'Courier New', monospace;
+}
+
+.dark-theme {
+  background-color: #000;
+  color: #fff;
+}
+
+.glass-panel {
+  background-color: rgba(0, 0, 0, 0.7);
+}
+
+/* =========================================
+   Keyframes (atomic, de-duped)
+========================================= */
+
+/* Smooth rainbow shimmer + pulse (for mic recording, etc.) */
+@keyframes rainbow-hue {
+  0%   { filter: hue-rotate(0deg); }
+  100% { filter: hue-rotate(360deg); }
+}
+@keyframes rainbow-pulse {
+  0%, 100% {
+    text-shadow:
+      0 0 6px currentColor,
+      0 0 12px currentColor,
+      0 0 20px currentColor,
+      0 0 30px currentColor;
+    transform: scale(1);
+  }
+  50% {
+    text-shadow:
+      0 0 12px currentColor,
+      0 0 24px currentColor,
+      0 0 36px currentColor,
+      0 0 48px currentColor;
+    transform: scale(1.08);
+  }
+}
+
+/* Neon rainbow text glow variants */
+@keyframes neon-rainbow-glow {
+  0%, 100% { text-shadow: 0 0 5px rgba(255, 0, 255, .8), 0 0 10px rgba(255, 0, 255, .7), 0 0 20px rgba(255, 0, 255, .6), 0 0 30px rgba(255, 0, 255, .5); }
+  25%      { text-shadow: 0 0 5px rgba(128, 0, 255, .8), 0 0 10px rgba(128, 0, 255, .7), 0 0 20px rgba(128, 0, 255, .6), 0 0 30px rgba(128, 0, 255, .5); }
+  50%      { text-shadow: 0 0 5px rgba(0, 255, 255, .8), 0 0 10px rgba(0, 255, 255, .7), 0 0 20px rgba(0, 255, 255, .6), 0 0 30px rgba(0, 255, 255, .5); }
+  75%      { text-shadow: 0 0 5px rgba(0, 247, 255, .8), 0 0 10px rgba(0, 255, 195, .7), 0 0 20px rgba(0, 255, 217, .6), 0 0 30px rgba(0, 255, 128, .5); }
+}
+
+/* Dynamic, more varied neon */
+@keyframes neon-dynamic-glow {
+  0%, 100% { text-shadow: 0 0 5px rgba(242, 0, 242, .9), 0 0 10px rgba(242, 0, 242, .8), 0 0 20px rgba(242, 0, 242, .7); opacity: .95; }
+  20%      { text-shadow: 0 0 5px rgba(255, 111, 0, .9), 0 0 10px rgba(255, 119, 0, .8), 0 0 20px rgba(255, 165, 0, .7); }
+  40%      { text-shadow: 0 0 5px rgba(125, 220, 37, .9), 0 0 10px rgba(164, 220, 32, .8), 0 0 20px rgba(34, 218, 55, .7); }
+  60%      { text-shadow: 0 0 5px rgba(0, 221, 255, .9), 0 0 10px rgba(0, 195, 255, .8), 0 0 20px rgba(0, 136, 255, .7); }
+  80%      { text-shadow: 0 0 5px rgba(96, 18, 252, .9), 0 0 10px rgba(132, 34, 252, .8), 0 0 20px rgba(123, 0, 255, .7); }
+}
+
+/* Pastel variants */
+@keyframes pastel-rainbow-glow {
+  0%, 100% { text-shadow: 0 0 10px rgb(247, 102, 124), 0 0 20px rgba(247, 122, 141, 0.8), 0 0 30px rgba(127,79,95,.5); }
+  20%      { text-shadow: 0 0 10px rgb(75, 192, 232), 0 0 20px rgba(123, 202, 229, 0.8), 0 0 30px rgba(50,60,80,.5); }
+  40%      { text-shadow: 0 0 10px rgb(250, 250, 79), 0 0 20px rgba(243, 243, 107, 0.8), 0 0 30px rgba(80,80,50,.5); }
+  60%      { text-shadow: 0 0 10px rgb(185, 83, 252), 0 0 20px rgba(189, 97, 251, 0.8), 0 0 30px rgba(70,50,80,.5); }
+  80%      { text-shadow: 0 0 10px rgb(91, 246, 230), 0 0 20px rgba(81, 245, 229, 0.8), 0 0 30px rgba(50,80,50,.5); }
+}
+
+/* Misc glows */
+@keyframes soft-blue-glow {
+  0%, 100% { text-shadow: 0 0 5px rgba(173,216,230,.8), 0 0 10px rgba(173,216,230,.7); }
+  50%      { text-shadow: 0 0 5px rgba(255,255,255,.8), 0 0 10px rgba(255,255,255,.7); }
+}
+@keyframes cyan-mint-glow {
+  0%, 100% { text-shadow: 0 0 5px rgba(12,255,206,.8), 0 0 10px rgba(12,255,206,.7); }
+  50%      { text-shadow: 0 0 5px rgba(255,255,255,.8), 0 0 10px rgba(255,255,255,.7); }
+}
+@keyframes orange-glow {
+  0%, 100% { text-shadow: 0 0 5px rgba(255,165,0,.8), 0 0 10px rgba(255,165,0,.7); }
+  50%      { text-shadow: 0 0 5px rgba(255,255,255,.8), 0 0 10px rgba(255,255,255,.7); }
+}
+
+/* Simple blink */
+@keyframes fade-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+
+/* Drip & Resizer */
+@keyframes hover-drip {
+  0%   { opacity: 0; transform: scale(.1) translateY(-5px); }
+  20%  { opacity: .5; transform: scale(.6) translateY(0); }
+  100% { opacity: .7; transform: scale(1) translateY(0); }
+}
+@keyframes resizer-ache-glow-anim {
+  0%, 100% { background-color: rgba(139,92,246,.5); box-shadow: 0 0 3px rgba(139,92,246,.4); }
+  50%      { background-color: rgba(139,92,246,.8); box-shadow: 0 0 3px rgba(139,92,246,.6); }
+}
+
+/* =========================================
+   Effect Classes
+========================================= */
+
+/* Smooth rainbow shimmer (use this for mic recording) */
+.rainbow-glow {
+  animation:
+    rainbow-hue 6s linear infinite,
+    rainbow-pulse 2s ease-in-out infinite;
+  display: inline-block;
+  will-change: filter, transform;
+}
+
+/* Generic blink */
+.blink { animation: fade-blink .8s ease-in-out infinite; }
+
+/* Random-glow placeholder (color via inline style) */
+.random-glow { /* text-shadow set via inline style */ }
+
+/* Text glow presets */
+.acheintegrated-glow { animation: neon-rainbow-glow 8s linear infinite; }
+.blurline-glow       { animation: neon-dynamic-glow 4s linear infinite; }
+.neon-rainbow-glow   { animation: neon-rainbow-glow 8s linear infinite; }
+.neon-rainbow-glow-slow { animation: neon-rainbow-glow 10s linear infinite; }
+.neon-dynamic-glow-text { animation: neon-dynamic-glow 12s linear infinite; }
+
+/* Pastel / themed hover glows */
+.baby-pink-blue-glow-hover:hover { animation: baby-pink-blue-glow 2s ease-in-out infinite; }
+.memory-nest-glow-hover:hover    { animation: baby-blue-violet-glow 2s ease-in-out infinite; }
+.blur-glow-hover:hover           { animation: soft-blue-glow 2s ease-in-out infinite; }
+.search-threads-glow-hover:hover { animation: cyan-mint-glow 2s ease-in-out infinite; }
+/* (You can add more hover variants if desired) */
+
+/* Threads/resizer */
+.threads-glow        { animation: soft-blue-glow 2s ease-in-out infinite; }
+.threads-glow-hover:hover { animation: soft-blue-glow 2s ease-in-out infinite; }
+.resizer-ache-glow   { animation: resizer-ache-glow-anim 3s ease-in-out infinite; }
+
+/* Drip effects */
+.hover-drip-effect { position: relative; }
+.hover-drip-effect::after {
+  content: '';
+  position: absolute; inset: 0;
+  background-color: rgba(60,60,70,.4);
+  border-radius: 4px; z-index: -1; opacity: 0;
+  transform-origin: top center;
+  animation: hover-drip .3s ease-out forwards;
+}
+.nav-item-hover { position: relative; }
+.nav-item-hover::after {
+  content: '';
+  position: absolute; top: 100%; left: 0;
+  width: 100%; height: 100%;
+  background-color: rgba(60,60,70,.4);
+  border-radius: 4px; z-index: -1; opacity: 0;
+  transform-origin: top center;
+  animation: hover-drip .3s ease-out forwards;
+}
+
+/* =========================================
+   Global & Element Styles
+========================================= */
+
+*:focus,
+*:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+
+body {
+  font-family: var(--interface-font), monospace !important;
+}
+.body-font {
+  font-family: var(--body-font), monospace !important;
+}
+/* Icons pick up interface font */
+.icon-font {
+  font-family: var(--interface-font), monospace;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #000; }
+::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+
+/* Tooltip fixes */
+.group { position: relative; }
+.group-hover\:opacity-100 { opacity: 0; z-index: 50; }
+.group:hover .group-hover\:opacity-100 { opacity: 1 !important; }
+
+/* Mode buttons */
+.mode-button {
+  display: flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; cursor: pointer;
+  transition: all .3s ease-in-out; text-shadow: none;
+}
+.mode-separator { margin: 0 .5rem; color: #3f3f46; transition: all .3s ease-in-out; }
+.mode-button:not(.mode-astrofuck-active):hover,
+.mode-button:not(.mode-dream-active):hover { color: #fff; text-shadow: 0 0 5px rgba(255,255,255,.6); }
+.mode-separator:hover { color: #fff; }
+
+.mode-astrofuck-active {
+  animation: neon-rainbow-glow 8s linear infinite;
+  color: #fff; filter: saturate(1.5) brightness(1.2);
+}
+.mode-dream-active {
+  animation: pastel-rainbow-glow 8s linear infinite;
+  color: #fff; filter: saturate(1.5) brightness(1.2);
+}
+
+/* Cursor blink */
+.blinking-cursor { animation: blink 1s step-end infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Markdown-ish prose */
+.prose h1, .prose h2, .prose h3 { font-weight: 700; margin-top: 1em; margin-bottom: .5em; }
+.prose p { margin-bottom: 1em; }
+.prose strong { font-weight: 700; }
+.prose ul, .prose ol { list-style-position: inside; margin-left: 1.5em; margin-bottom: 1em; }
+.prose li { margin-bottom: .25em; }
+
+/* globals.css or your main stylesheet */
+#context-menu {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+.context-item {
+  position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Prevent text selection during right-click */
+.thread-item, .prompt-item {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -khtml-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+.thread-item::selection,
+.prompt-item::selection {
+  background: transparent;
+}
+
+/* Ensure menu doesn't get cut off */
+#context-menu {
+  max-width: min(250px, calc(100vw - 16px));
+  max-height: min(200px, calc(100vh - 16px));
+  overflow: hidden;
+}

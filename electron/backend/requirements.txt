@@ -1,0 +1,6 @@
+uvicorn[standard]
+fastapi
+PyYAML
+faiss-cpu
+llama-cpp-python
+sentence-transformers

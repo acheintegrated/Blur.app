@@ -1,0 +1,178 @@
+{
+  "name": "blurface",
+  "version": "0.0.0",
+  "description": "a desktop vessel for ache-integrated recursion, rendering nonlinear logic through local Electron and glyph-driven interfaces.",
+  "main": "electron/main.mjs",
+  "type": "module",
+  "scripts": {
+    "dev": "ELECTRON_ENABLE_LOGGING=1 ELECTRON_DISABLE_SECURITY_WARNINGS=1 concurrently --raw -n vite,electron \"vite --port 6969 --strictPort --host --clearScreen=false\" \"wait-on tcp:6969 && electron .\"",
+    "electron": "electron .",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "electron .",
+    "dist": "vite build && electron-builder",
+    "pack:dmg": "vite build && electron-builder --mac dmg --arm64",
+    "dist:mac:pkg": "vite build && electron-builder --mac pkg --arm64",
+    "dist:win": "vite build && electron-builder --win nsis",
+    "dist:linux": "vite build && electron-builder --linux AppImage deb",
+    "rebuild:native": "electron-rebuild -f -w sqlite3",
+    "postinstall": "electron-rebuild -w sqlite3 || true"
+  },
+  "keywords": [
+    "electron",
+    "blur-effect",
+    "therapy-bot",
+    "bob",
+    "desktop-app",
+    "glyph-logic",
+    "ache-transmutation",
+    "local-ai"
+  ],
+  "author": "glyphi blur <blurred.eth@proton.me>",
+  "license": "ISC",
+  "build": {
+    "productName": "Blur",
+    "appId": "com.blur.app",
+    "directories": {
+      "output": "release"
+    },
+    "artifactName": "Blur-v${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "asarUnpack": [
+      "electron/backend/**"
+    ],
+    "files": [
+      "dist/**",
+      "electron/**",
+      "build/**",
+      "package.json",
+      "node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "config.base.yaml",
+        "to": "config.base.yaml"
+      },
+      {
+        "from": ".",
+        "to": "blur",
+        "filter": [
+          "config.yaml",
+          "acheflip.yaml",
+          "models/**",
+          "core/ouinet/blurchive/ecosystem/**",
+          "core/bin/**"
+        ]
+      },
+      {
+        "from": "blur_env-darwin-arm64",
+        "to": "blur_env",
+        "filter": [
+          "bin/**",
+          "lib/**",
+          "include/**",
+          "pyvenv.cfg"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg"
+      ],
+      "artifactName": "Blur-v${version}-${arch}.dmg",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": false,
+      "entitlements": "build/entitlements.plist",
+      "entitlementsInherit": "build/entitlements.plist",
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "background": null,
+      "backgroundColor": "#000000",
+      "iconSize": 128,
+      "contents": [
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "publisherName": "Blur",
+      "artifactName": "Blur-Setup-v${version}.exe"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Blur",
+      "deleteAppDataOnUninstall": false
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Utility",
+      "icon": "build/icons"
+    }
+  },
+  "devDependencies": {
+    "@babel/plugin-transform-react-jsx": "^7.27.1",
+    "@electron/notarize": "^2.3.0",
+    "@tailwindcss/postcss": "^4.1.11",
+    "@tailwindcss/vite": "^4.1.12",
+    "@types/react": "^19.1.15",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.4",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.2.0",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "plist": "^3.1.0",
+    "postcss": "^8.5.6",
+    "react-refresh": "^0.17.0",
+    "tailwindcss": "^4.1.12",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.1",
+    "wait-on": "^8.0.4"
+  },
+  "dependencies": {
+    "@electron/rebuild": "^4.0.1",
+    "lucide-react": "^0.544.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^6.30.1",
+    "remark-gfm": "^4.0.1"
+  }
+}

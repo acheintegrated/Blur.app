@@ -1,0 +1,166 @@
+Script started on Wed Sep 10 11:17:14 2025
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                      ]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004h[7mpython convo_chat_core.py[27m
+[K[A[43C[27mp[27my[27mt[27mh[27mo[27mn[27m [27mc[27mo[27mn[27mv[27mo[27m_[27mc[27mh[27ma[27mt[27m_[27mc[27mo[27mr[27me[27m.[27mp[27my[1B[K[?2004l
+INFO:     --- Blur Core v4.7 (Lang-Hysteresis) Booting ---
+INFO:     Reading config: /opt/blur/config.yaml
+/opt/blurface/electron/backend/convo_chat_core.py:537: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+/opt/blurface/electron/backend/convo_chat_core.py:583: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("shutdown")
+[32mINFO[0m:     Started server process [[36m63546[0m]
+[32mINFO[0m:     Waiting for application startup.
+INFO:     ✨ Startup: loading config...
+INFO:     Resolved homes: {'blur_home': '/opt/blur', 'models': '/opt/blur/core/brain/models', 'pipes': '${meta.homes.blur_home}/run/pipes', 'data': '/opt/blur/core'}
+[32mINFO[0m:     Application startup complete.
+llama_context: n_ctx_per_seq (8192) < n_ctx_train (262144) -- the full capacity of the model will not be utilized
+ggml_metal_init: skipping kernel_get_rows_bf16                     (not supported)
+ggml_metal_init: skipping kernel_set_rows_bf16                     (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32                   (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_c4                (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_1row              (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_l4                (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_bf16                  (not supported)
+ggml_metal_init: skipping kernel_mul_mv_id_bf16_f32                (not supported)
+ggml_metal_init: skipping kernel_mul_mm_bf16_f32                   (not supported)
+ggml_metal_init: skipping kernel_mul_mm_id_bf16_f16                (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h64           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h80           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h96           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h112          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h128          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h192          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_hk192_hv128   (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h256          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_hk576_hv512   (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h64       (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h96       (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h128      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h192      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_hk192_hv128 (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h256      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_hk576_hv512 (not supported)
+ggml_metal_init: skipping kernel_cpy_f32_bf16                      (not supported)
+ggml_metal_init: skipping kernel_cpy_bf16_f32                      (not supported)
+ggml_metal_init: skipping kernel_cpy_bf16_bf16                     (not supported)
+INFO:     ✅ Vessel 'qwen3_4b_unified' online (qwen2, role=chat/safety).
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                      ]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004hppython convo_chat_core.py[?2004l
+INFO:     --- Blur Core v4.7 (Lang-Hysteresis) Booting ---
+INFO:     Reading config: /opt/blur/config.yaml
+/opt/blurface/electron/backend/convo_chat_core.py:555: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+/opt/blurface/electron/backend/convo_chat_core.py:601: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("shutdown")
+[32mINFO[0m:     Started server process [[36m63607[0m]
+[32mINFO[0m:     Waiting for application startup.
+INFO:     ✨ Startup: loading config...
+INFO:     Resolved homes: {'blur_home': '/opt/blur', 'models': '/opt/blur/core/brain/models', 'pipes': '${meta.homes.blur_home}/run/pipes', 'data': '/opt/blur/core'}
+[32mINFO[0m:     Application startup complete.
+llama_context: n_ctx_per_seq (8192) < n_ctx_train (262144) -- the full capacity of the model will not be utilized
+ggml_metal_init: skipping kernel_get_rows_bf16                     (not supported)
+ggml_metal_init: skipping kernel_set_rows_bf16                     (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32                   (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_c4                (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_1row              (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_l4                (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_bf16                  (not supported)
+ggml_metal_init: skipping kernel_mul_mv_id_bf16_f32                (not supported)
+ggml_metal_init: skipping kernel_mul_mm_bf16_f32                   (not supported)
+ggml_metal_init: skipping kernel_mul_mm_id_bf16_f16                (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h64           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h80           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h96           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h112          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h128          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h192          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_hk192_hv128   (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h256          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_hk576_hv512   (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h64       (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h96       (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h128      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h192      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_hk192_hv128 (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h256      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_hk576_hv512 (not supported)
+ggml_metal_init: skipping kernel_cpy_f32_bf16                      (not supported)
+ggml_metal_init: skipping kernel_cpy_bf16_f32                      (not supported)
+ggml_metal_init: skipping kernel_cpy_bf16_bf16                     (not supported)
+INFO:     ✅ Vessel 'qwen3_4b_unified' online (qwen2, role=chat/safety).
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                      ]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004hppython convo_chat_core.py[?2004l
+INFO:     --- Blur Core v4.7 (Lang-Hysteresis) Booting ---
+INFO:     Reading config: /opt/blur/config.yaml
+/opt/blurface/electron/backend/convo_chat_core.py:421: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+/opt/blurface/electron/backend/convo_chat_core.py:467: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("shutdown")
+[32mINFO[0m:     Started server process [[36m63644[0m]
+[32mINFO[0m:     Waiting for application startup.
+INFO:     ✨ Startup: loading config...
+INFO:     Resolved homes: {'blur_home': '/opt/blur', 'models': '/opt/blur/core/brain/models', 'pipes': '${meta.homes.blur_home}/run/pipes', 'data': '/opt/blur/core'}
+INFO:     --- Preparing to load vessel: qwen3_4b_unified ---
+[32mINFO[0m:     Application startup complete.
+[31mERROR[0m:    [Errno 48] error while attempting to bind on address ('127.0.0.1', 8000): address already in use
+[32mINFO[0m:     Waiting for application shutdown.
+INFO:     Sessions cleared on shutdown.
+[32mINFO[0m:     Application shutdown complete.
+INFO:     [qwen3_4b_unified] Resolving path: ${meta.homes.models}/Qwen3-4B-Instruct-2507-UD-Q8_K_XL.gguf
+INFO:     [qwen3_4b_unified] Model file found. Preparing to load into llama.cpp...
+INFO:     [qwen3_4b_unified] Identified as standard model. Initializing Llama...
+llama_context: n_ctx_per_seq (8192) < n_ctx_train (262144) -- the full capacity of the model will not be utilized
+ggml_metal_init: skipping kernel_get_rows_bf16                     (not supported)
+ggml_metal_init: skipping kernel_set_rows_bf16                     (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32                   (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_c4                (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_1row              (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_f32_l4                (not supported)
+ggml_metal_init: skipping kernel_mul_mv_bf16_bf16                  (not supported)
+ggml_metal_init: skipping kernel_mul_mv_id_bf16_f32                (not supported)
+ggml_metal_init: skipping kernel_mul_mm_bf16_f32                   (not supported)
+ggml_metal_init: skipping kernel_mul_mm_id_bf16_f16                (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h64           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h80           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h96           (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h112          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h128          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h192          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_hk192_hv128   (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h256          (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_bf16_hk576_hv512   (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h64       (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h96       (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h128      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h192      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_hk192_hv128 (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h256      (not supported)
+ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_hk576_hv512 (not supported)
+ggml_metal_init: skipping kernel_cpy_f32_bf16   

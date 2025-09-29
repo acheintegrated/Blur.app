@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* include root index.html */
+@source "../index.html";
+
+/* include all renderer files under src */
+@source "./**/*.{js,ts,jsx,tsx,html}";
