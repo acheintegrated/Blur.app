@@ -124,12 +124,6 @@ whisper_model = None
 SLANG_LEXICON = ["nah man","ye","dope","vibe check","bullshit","slice it","fartin' chaos","edgy truth","stylish flip","i don't flinch"]
 DREAM_BANS = {w.lower() for w in SLANG_LEXICON}
 
-MODE_SEEDS = {
-    "dream":     "You are DREAM: gentle, precise, grounded. Speak in 1–3 short lines. Do not include metrics, role tags, or internal logs.",
-    "astrofuck": "You are ASTROFUCK: direct, punchy, kind. 1–3 punchy lines. No therapy metrics, no role tags.",
-    "sentinel":  "You are SENTINEL: calm, specific, de-escalating. 1–3 lines. Avoid poetic language; be concrete.",
-}
-
 # ---------- APP ----------
 app = FastAPI(default_response_class=ORJSONResponse)
 
@@ -699,7 +693,10 @@ class MemoryPayload(BaseModel):
 async def generate_response_stream(session: Dict, request: RequestModel):
     user_text = (request.prompt or "").strip()
     req_mode = (request.mode or "dream").strip().lower()
-    mode = req_mode if req_mode in MODE_SEEDS else "dream"
+    
+    # Ensure mode exists in config, otherwise default to "dream"
+    available_modes = get_cfg("range.modes", {})
+    mode = req_mode if req_mode in available_modes else "dream"
 
     lang = language_hysteresis_update_lang(session, user_text)
 
@@ -709,19 +706,43 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         yield "Model not loaded."
         return
 
+    # --- PROMPT ASSEMBLY REFORGED ---
+    # This now builds the prompt from your config.yaml instead of using hardcoded values.
+    system_prompt_parts = []
+    
+    # 1. Get the main system prompt
+    system_core = get_cfg("prompts.system_core", "")
+    if system_core:
+        system_prompt_parts.append(system_core)
+
+    # 2. Get the mode-specific style contract
+    style_contract = get_cfg(f"prompts.style_contract_{mode}", "")
+    if style_contract:
+        system_prompt_parts.append(style_contract)
+    
+    # 3. Get the mode-specific injection/lock
+    mode_inject = get_cfg(f"prompts.mode_tone_inject.{mode}", "")
+    if mode_inject:
+        system_prompt_parts.append(mode_inject)
+
+    final_system_prompt = "\n\n".join(system_prompt_parts)
+    # --- END REFORGE ---
+
     context = retrieve_context_blend(user_text, session.get("id"), None, session.get("username") or request.username, top_k=5)
     audience = (session.get("audience") or get_cfg("release.audience_default","internal")).lower()
 
     history_pairs = session.get("history", [])[-int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)) :]
-    msgs = build_messages(mode, MODE_SEEDS.get(mode, MODE_SEEDS["dream"]), history_pairs, user_text, context, lang)
+    
+    # Use the newly assembled system prompt
+    msgs = build_messages(mode, final_system_prompt, history_pairs, user_text, context, lang)
 
     mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
     params = dict(
         messages=msgs,
-        temperature=float(mp.get("temperature",0.6)),
-        top_p=float(mp.get("top_p",0.9)),
-        repeat_penalty=float(mp.get("repeat_penalty",1.12)),
-        max_tokens=int(mp.get("n_predict",768)),
+        temperature=float(mp.get("temperature", 0.6)),
+        top_p=float(mp.get("top_p", 0.9)),
+        repeat_penalty=float(mp.get("repeat_penalty", 1.12)),
+        max_tokens=int(mp.get("n_predict", 4444)),
         stop=["</s>","<|im_end|>","[INST]","[/INST]"],
         stream=True
     )
@@ -757,7 +778,6 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
     session["turn"] = int(session.get("turn", 0)) + 1
 
-    # autosave immediately
     try:
         save_sessions()
     except Exception:
