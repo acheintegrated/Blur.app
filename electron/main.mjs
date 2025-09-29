@@ -1,12 +1,12 @@
-// electron/main.mjs — REFORGED v9.5 (robust python launch)
+// electron/main.mjs — REFORGED v10.1 (BLUR_HOME-first, home-preferred config, versioned optional unpack, robust python launch)
 import { app, BrowserWindow, shell, ipcMain, globalShortcut } from "electron";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import path, { dirname, join, resolve, basename } from "path";
-import os from "os"; // Import the os module
+import os from "os";
 import fs, {
   readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync,
-  copyFileSync, readdirSync, statSync,
+  copyFileSync, readdirSync, statSync
 } from "fs";
 import http from "http";
 import https from "https";
@@ -15,7 +15,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /* ============================================================================
-   HARDEN/DEBUG FLAGS
+   FLAGS
 ============================================================================ */
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("allow-running-insecure-content");
@@ -47,7 +47,7 @@ const appDataRoot = app.getPath("appData");
 const canonicalUserData = join(appDataRoot, APP_NAME);
 app.setPath("userData", canonicalUserData);
 
-// migrate old dirs (best-effort)
+// best-effort migrate legacy userData
 try {
   if (!existsSync(canonicalUserData)) mkdirSync(canonicalUserData, { recursive: true });
   const oldDirs = [join(appDataRoot, "blurface"), join(appDataRoot, "Blurface")];
@@ -85,69 +85,232 @@ const log = (...args) => {
 };
 
 /* ============================================================================
-   ENV + CONFIG
+   BLUR_HOME + RESOURCES
+   Goal: Prefer ~/blur if it exists. If not, unpack bundled resources to
+         ~/Library/Application Support/Blur/blur (mac) and use that.
 ============================================================================ */
-function detectDefaultBlurHome() {
-  const cands = ["/opt/blurface", "/opt/blur"];
-  for (const c of cands) { try { if (existsSync(c)) return c; } catch {} }
-  return "/opt/blur";
+function homeBlurPath() { return resolve(os.homedir(), "blur"); }
+function packagedBlurPath() { return join(app.getPath("appData"), APP_NAME, "blur"); } // ~/Library/Application Support/Blur/blur
+function getBundledBlurRoot() {
+  const res = process.resourcesPath || join(__dirname, "..");
+  const cand = join(res, "blur"); // electron-builder extraResources → Contents/Resources/blur
+  return existsSync(cand) ? cand : null;
 }
-function readPackagedCfg() {
-  try {
-    const cfgPath = join(process.resourcesPath || join(__dirname, "..", "build"), "blur_backend.json");
-    return JSON.parse(readFileSync(cfgPath, "utf-8"));
-  } catch { return null; }
-}
-function wirePackagedEnv() {
-  const RES = process.resourcesPath;
-  const BUNDLED_BLUR = join(RES || "", "blur");
-  const BUNDLED_CFG  = join(BUNDLED_BLUR, "config.yaml");
-  const MODELS       = join(BUNDLED_BLUR, "core", "brain", "models");
-  const BLUR_BIN     = join(BUNDLED_BLUR, "bin");
-  process.env.BLUR_RESOURCES_DIR = RES || "";
-  process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
-  if (app.isPackaged && existsSync(BUNDLED_BLUR)) {
-    process.env.BLUR_HOME = BUNDLED_BLUR;
-    if (existsSync(BUNDLED_CFG)) process.env.BLUR_CONFIG_PATH = BUNDLED_CFG;
-    if (!process.env.BLUR_WHISPER_ROOT && existsSync(join(MODELS, "whisper"))) {
-      process.env.BLUR_WHISPER_ROOT = join(MODELS, "whisper");
-    }
-    const currentPATH = process.env.PATH || "";
-    process.env.PATH = [BLUR_BIN, currentPATH].filter(Boolean).join(path.delimiter);
+function statSafe(p) { try { return statSync(p); } catch { return null; } }
+function cpRecursive(src, dst) {
+  const st = statSafe(src);
+  if (!st) return;
+  if (st.isDirectory()) {
+    mkdirSync(dst, { recursive: true });
+    for (const name of readdirSync(src)) cpRecursive(join(src, name), join(dst, name));
+  } else {
+    mkdirSync(path.dirname(dst), { recursive: true });
+    copyFileSync(src, dst);
   }
 }
+function rmrf(p) {
+  try {
+    const st = statSafe(p);
+    if (!st) return;
+    if (st.isDirectory()) {
+      for (const f of readdirSync(p)) rmrf(join(p, f));
+      fs.rmdirSync(p);
+    } else fs.unlinkSync(p);
+  } catch {}
+}
+function readYamlVersion(yamlText = "") {
+  const m = yamlText.match(/^\s*version:\s*['"]?([^'"\n]+)['"]?/mi);
+  return (m && m[1] && m[1].trim()) || "";
+}
+
+/**
+ * Ensure BLUR_HOME is set:
+ *  - If env BLUR_HOME provided → use it.
+ *  - Else if ~/blur exists → use it (no copy).
+ *  - Else use packaged appData path and (if packaged & bundled) copy initial resources there.
+ * Also sets BLUR_CONFIG_PATH to ${BLUR_HOME}/config.yaml if present.
+ */
+async function ensureBlurHomeAndUnpack() {
+  const envSet = !!process.env.BLUR_HOME;
+  const homePath = homeBlurPath();
+  const homeExists = existsSync(homePath);
+  const bundledRoot = getBundledBlurRoot();
+
+  // Decide BLUR_HOME
+  if (!envSet) {
+    if (homeExists) {
+      process.env.BLUR_HOME = homePath; // home-first if present
+    } else {
+      process.env.BLUR_HOME = app.isPackaged ? packagedBlurPath() : homePath; // dev defaults to ~/blur
+    }
+  }
+  const BLUR_HOME = process.env.BLUR_HOME;
+  mkdirSync(BLUR_HOME, { recursive: true });
+
+  // If we’re using home tree, DO NOT overwrite with bundled files.
+  const usingHome = BLUR_HOME === homePath;
+  if (usingHome) {
+    log(`[resources] Using existing home tree: ${BLUR_HOME}`);
+  } else {
+    // Using appData path; if packaged, copy/upgrade from bundled resources (version-aware)
+    if (app.isPackaged && bundledRoot) {
+      const srcCfg = join(bundledRoot, "config.yaml");
+      const dstCfg = join(BLUR_HOME, "config.yaml");
+
+      let needsCopy = false;
+      try {
+        const srcText = existsSync(srcCfg) ? readFileSync(srcCfg, "utf8") : "";
+        const dstText = existsSync(dstCfg) ? readFileSync(dstCfg, "utf8") : "";
+        const vSrc = readYamlVersion(srcText);
+        const vDst = readYamlVersion(dstText);
+        needsCopy = !existsSync(dstCfg) || (!!vSrc && vSrc !== vDst);
+        log(`[resources] bundled→appData version check: src=${vSrc || "?"} dst=${vDst || "?"} needsCopy=${needsCopy}`);
+      } catch (e) {
+        needsCopy = !existsSync(dstCfg);
+        log("[resources] version compare failed; defaulting to copy:", String(e?.message || e));
+      }
+
+      if (needsCopy) {
+        const toCopy = [
+          "config.yaml",
+          "acheflip.yaml",
+          join("core","ouinet","blurchive","ecosystem"),
+          "models",
+          join("core","bin"),
+        ];
+        for (const rel of toCopy) {
+          const src = join(bundledRoot, rel);
+          const dst = join(BLUR_HOME, rel);
+          try {
+            if (!existsSync(src)) continue;
+            if (statSafe(src)?.isDirectory()) {
+              rmrf(dst);
+              cpRecursive(src, dst);
+            } else {
+              mkdirSync(path.dirname(dst), { recursive: true });
+              copyFileSync(src, dst);
+            }
+            log(`[resources] copied ${rel}`);
+          } catch (e) {
+            log(`[resources] copy error for ${rel}:`, String(e?.message || e));
+          }
+        }
+      }
+    } else {
+      log(`[resources] No bundled root or not packaged; BLUR_HOME=${BLUR_HOME}`);
+    }
+  }
+
+  // PATH for helper bins (won’t hurt in dev)
+  const BLUR_BIN = join(BLUR_HOME, "core", "bin");
+  const prevPath = process.env.PATH || "";
+  if (!prevPath.split(path.delimiter).includes(BLUR_BIN) && existsSync(BLUR_BIN)) {
+    process.env.PATH = [BLUR_BIN, prevPath].filter(Boolean).join(path.delimiter);
+  }
+
+  // Pin config if present and not already specified
+  if (!process.env.BLUR_CONFIG_PATH) {
+    const userCfg = join(BLUR_HOME, "config.yaml");
+    if (existsSync(userCfg)) process.env.BLUR_CONFIG_PATH = userCfg;
+  }
+
+  // Optional whisper root
+  if (!process.env.BLUR_WHISPER_ROOT) {
+    const maybeWhisper = join(BLUR_HOME, "models", "whisper");
+    if (existsSync(maybeWhisper)) process.env.BLUR_WHISPER_ROOT = maybeWhisper;
+  }
+
+  process.env.BLUR_RESOURCES_DIR = process.resourcesPath || "";
+  process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
+}
+
+/* ============================================================================
+   CONFIG BOOTSTRAP (only used if nothing provided)
+   Order now: BLUR_CONFIG_PATH (if set) → ${BLUR_HOME}/config.yaml → bundled config → write minimal to ${BLUR_HOME}/config.yaml
+============================================================================ */
 function minimalConfigYAML() {
+  const home = process.env.BLUR_HOME || homeBlurPath();
   return [
     "# Blur minimal bootstrap config",
-    "app:", "  name: Blur", "  mode: dream",
-    "core:", `  host: ${CORE_HOST}`, `  port: ${CORE_PORT}`,
-    "paths:", `  home: ${process.env.BLUR_HOME || detectDefaultBlurHome()}`,
-    "  models: ${paths.home}/core/brain/models",
-    "  whisper_root: ${paths.models}/whisper",
-    "rag:", "  enabled: true", "  libraries: []",
-    "safety:", "  crisis_keywords: [\"kill myself\", \"suicide\", \"end my life\"]", ""
+    "meta:",
+    "  homes:",
+    `    blur_home: ${home}`,
+    `    models: ${home}/models`,
+    `    pipes: ${home}/run/pipes`,
+    `    data: ${home}/core`,
+    "",
+    "chat:",
+    "  vessel_key: qwen3_4b_unified",
+    "",
+    "engines:",
+    "  llama_cpp:",
+    "    python_n_ctx: 8192",
+    "    n_gpu_layers: 3",
+    "",
+    "models:",
+    "  qwen3_4b_unified:",
+    "    engine: llama_cpp",
+    `    path: ${home}/models/Qwen3-4B-Instruct-2507-UD-Q8_K_XL.gguf`,
+    "  snowflake_arctic_embed:",
+    "    engine: llama_cpp",
+    `    path: ${home}/models/snowflake-arctic-embed-m-Q4_K_M.gguf`,
+    "  bge_reranker_tiny:",
+    "    engine: llama_cpp",
+    `    path: ${home}/models/bge-reranker-v2-m3-Q8_0.gguf`,
+    "",
+    "memory:",
+    "  vector_store:",
+    "    engine: faiss",
+    `    path: ${home}/core/ouinet/blurchive/ecosystem/blur_knowledge.index`,
+    `    chunks_path: ${home}/core/ouinet/blurchive/ecosystem/knowledge_chunks.jsonl`,
+    "    embed_model: snowflake_arctic_embed",
+    "    ttl_days_persistent: 120",
+    "    auto_compact_on_start: true",
+    "",
   ].join("\n");
 }
 function bootstrapConfigIfMissing() {
   const envPath = process.env.BLUR_CONFIG_PATH;
-  if (envPath && existsSync(envPath)) { log(`[config] Using existing BLUR_CONFIG_PATH=${envPath}`); return envPath; }
-  const userCfg = join(app.getPath("userData"), "config.yaml");
-  if (existsSync(userCfg)) { process.env.BLUR_CONFIG_PATH = userCfg; log(`[config] Using user config @ ${userCfg}`); return userCfg; }
-  if (!process.env.BLUR_HOME) process.env.BLUR_HOME = detectDefaultBlurHome();
-  const homeCfg = join(process.env.BLUR_HOME, "config.yaml");
+  if (envPath && existsSync(envPath)) { log(`[config] Using BLUR_CONFIG_PATH=${envPath}`); return envPath; }
+
+  const home = process.env.BLUR_HOME || homeBlurPath();
+  const homeCfg = join(home, "config.yaml");
+  if (existsSync(homeCfg)) {
+    process.env.BLUR_CONFIG_PATH = homeCfg;
+    log(`[config] Using home config @ ${homeCfg}`);
+    return homeCfg;
+  }
+
+  const bundled = getBundledBlurRoot();
+  const bundledCfg = bundled && join(bundled, "config.yaml");
+  if (app.isPackaged && bundledCfg && existsSync(bundledCfg)) {
+    process.env.BLUR_CONFIG_PATH = bundledCfg;
+    log(`[config] Using bundled config @ ${bundledCfg}`);
+    return bundledCfg;
+  }
+
+  // last: create in HOME (not userData) so it’s stable
   try {
-    mkdirSync(path.dirname(userCfg), { recursive: true });
-    writeFileSync(userCfg, minimalConfigYAML(), { flag: "wx" });
-    process.env.BLUR_CONFIG_PATH = userCfg; log(`[config] Bootstrapped user config @ ${userCfg}`); return userCfg;
+    mkdirSync(path.dirname(homeCfg), { recursive: true });
+    writeFileSync(homeCfg, minimalConfigYAML(), { flag: "wx" });
+    process.env.BLUR_CONFIG_PATH = homeCfg;
+    log(`[config] Bootstrapped home config @ ${homeCfg}`);
+    return homeCfg;
   } catch {
+    // ultra-fallback
+    const userCfg = join(app.getPath("userData"), "config.yaml");
     try {
-      mkdirSync(path.dirname(homeCfg), { recursive: true });
-      writeFileSync(homeCfg, minimalConfigYAML(), { flag: "wx" });
-      process.env.BLUR_CONFIG_PATH = homeCfg; log(`[config] Bootstrapped home config @ ${homeCfg}`); return homeCfg;
+      mkdirSync(path.dirname(userCfg), { recursive: true });
+      writeFileSync(userCfg, minimalConfigYAML(), { flag: "w" });
+      process.env.BLUR_CONFIG_PATH = userCfg;
+      log(`[config] Bootstrapped userData config @ ${userCfg}`);
+      return userCfg;
     } catch {
       const fallback = join(app.getPath("userData"), `config.${Date.now()}.yaml`);
       writeFileSync(fallback, minimalConfigYAML());
-      process.env.BLUR_CONFIG_PATH = fallback; log(`[config] Bootstrapped fallback config @ ${fallback}`); return fallback;
+      process.env.BLUR_CONFIG_PATH = fallback;
+      log(`[config] Bootstrapped fallback config @ ${fallback}`);
+      return fallback;
     }
   }
 }
@@ -177,7 +340,7 @@ function initPrefsIPC() {
 }
 
 /* ============================================================================
-   BACKEND DISCOVERY + PYTHON
+   BACKEND DISCOVERY
 ============================================================================ */
 function looksLikeBackendDir(p) {
   try {
@@ -195,10 +358,9 @@ function findBackendDir() {
     join(app.getAppPath(), "electron", "backend"),
     join(process.resourcesPath || "", "app.asar.unpacked", "electron", "backend"),
     join(process.resourcesPath || "", "electron", "backend"),
-    resolve(os.homedir(), "blur", "electron", "backend"),
+    resolve(process.env.BLUR_HOME || homeBlurPath(), "electron", "backend"),
     resolve("/opt/blurface/electron/backend"),
     resolve("/opt/blur/electron/backend"),
-    resolve("/opt/blur"),
   ];
   for (const c of candidates) {
     if (looksLikeBackendDir(c)) {
@@ -210,7 +372,6 @@ function findBackendDir() {
   log(`[backend] Warning: Could not find backend directory, falling back to: ${fallbackDir}`);
   return fallbackDir;
 }
-
 function resolveCoreModule(backendDir) {
   const order = ["convo_chat_core.py", "core_server.py", "core.py", "server.py", "app.py"];
   for (const name of order) {
@@ -220,47 +381,38 @@ function resolveCoreModule(backendDir) {
   return "convo_chat_core:app";
 }
 
-// ----------------- REFORGED PYTHON RESOLVER -----------------
+/* ============================================================================
+   PYTHON RESOLUTION
+============================================================================ */
+function readPackagedCfg() {
+  try {
+    const cfgPath = join(process.resourcesPath || join(__dirname, "..", "build"), "blur_backend.json");
+    return JSON.parse(readFileSync(cfgPath, "utf-8"));
+  } catch { return null; }
+}
 function resolvePython() {
-  log("[python] Attempting to resolve Python executable...");
+  log("[python] Resolving Python executable...");
   const cfg = readPackagedCfg();
   if (cfg?.pythonPath) {
     const resolvedPath = (app.isPackaged && cfg.pythonPath.startsWith("@@RESOURCES@@"))
       ? cfg.pythonPath.replace("@@RESOURCES@@", process.resourcesPath) : cfg.pythonPath;
     if (existsSync(resolvedPath)) {
-      log(`[python] Found executable via packaged config: ${resolvedPath}`);
+      log(`[python] packaged config → ${resolvedPath}`);
       return resolvedPath;
     }
   }
-
-  const priorityCandidates = [
-    // Packaged app path (after build)
-    join(process.resourcesPath, "blur_env", "bin", "python3"),
-    // Dev path from manual test
+  const priority = [
+    join(process.resourcesPath || "", "blur_env", "bin", "python3"),             // shipped venv (preferred)
+    join(process.resourcesPath || "", "blur_env-darwin-arm64", "bin", "python3") // legacy name
+  ];
+  for (const p of priority) { if (existsSync(p)) { log(`[python] found ${p}`); return p; } }
+  const fallbacks = [
     "/opt/blur_env-darwin-arm64/bin/python3",
-  ];
-
-  for (const p of priorityCandidates) {
-    if (existsSync(p)) {
-      log(`[python] Found priority Python executable: ${p}`);
-      return p;
-    }
-  }
-  
-  const fallbackCandidates = [
-    join(process.resourcesPath, "blur_env-darwin-arm64", "bin", "python3"),
-    join(process.resourcesPath, "blur_env-darwin-x64", "bin", "python3"),
     "/opt/blur_env-darwin-x64/bin/python3",
-    "/opt/blur_env/bin/python3", // Known bad path, checked last
+    "/opt/blur_env/bin/python3",
   ];
-  for (const p of fallbackCandidates) {
-    if (existsSync(p)) {
-        log(`[python] Found fallback Python executable: ${p}`);
-        return p;
-    }
-  }
-  
-  log("[python] No specific Python executable found in common locations, falling back to 'python3' in system PATH.");
+  for (const p of fallbacks) { if (existsSync(p)) { log(`[python] fallback ${p}`); return p; } }
+  log("[python] using system python3");
   return "python3";
 }
 
@@ -275,22 +427,20 @@ function buildUvicornArgs(backendDir, useFastLoop = true) {
 }
 
 function startAIServer(useFastLoop = true) {
-  if (aiProc) { log("[main.mjs] AI Core start ignored: already running."); return; }
-  wirePackagedEnv();
-  if (!process.env.BLUR_HOME) process.env.BLUR_HOME = detectDefaultBlurHome();
-  const ensuredCfg = bootstrapConfigIfMissing();
+  if (aiProc) { log("[main] AI Core start ignored: already running."); return; }
 
   const backendDir = findBackendDir();
   const pythonCommand = resolvePython();
   const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
 
-  log("[main] Starting AI Core...");
+  log("[main] Starting AI Core…");
   log("--- [AI Core Launch Details] ---");
-  log(`[exec]  Command: ${pythonCommand}`);
-  log(`[args]  Arguments: ${uvicornArgs.join(" ")}`);
-  log(`[cwd]   Running in: ${backendDir}`);
-  log("[env]   BLUR_HOME=", process.env.BLUR_HOME);
-  log("[env]   BLUR_CONFIG_PATH=", process.env.BLUR_CONFIG_PATH, `(exists=${existsSync(ensuredCfg)})`);
+  log(`[exec]  ${pythonCommand}`);
+  log(`[args]  ${uvicornArgs.join(" ")}`);
+  log(`[cwd]   ${backendDir}`);
+  const cfgPathForLog = process.env.BLUR_CONFIG_PATH || "";
+  log(`[env]   BLUR_HOME=${process.env.BLUR_HOME}`);
+  log(`[env]   BLUR_CONFIG_PATH=${cfgPathForLog} (exists=${cfgPathForLog ? existsSync(cfgPathForLog) : false})`);
   log("--------------------------------");
 
   aiProc = spawn(pythonCommand, uvicornArgs, {
@@ -301,18 +451,25 @@ function startAIServer(useFastLoop = true) {
       PYTHONUNBUFFERED: "1",
       PYTHONPATH: [backendDir, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
       BLUR_CORE_PORT: CORE_PORT,
+      KMP_DUPLICATE_LIB_OK: "TRUE",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || "1",
+
+      // 🔧 OpenMP duplicate guard (prevents SIGABRT on macOS)
+      KMP_DUPLICATE_LIB_OK: "TRUE",
+      // Optional: keep OpenMP thread counts sane
+      OMP_NUM_THREADS: String(Math.max(1, os.cpus()?.length || 8)),
+      VECLIB_MAXIMUM_THREADS: "1"
     },
     detached: process.platform !== "win32",
   });
 
   aiProc.on("error", (err) => {
     log("--- [CRITICAL AI CORE SPAWN ERROR] ---");
-    log(`Failed to spawn process with command: ${pythonCommand}`);
-    log("This usually means the Python executable was not found or has permission issues.");
+    log(`Failed to spawn: ${pythonCommand}`);
     log(String(err?.stack || err?.message || err));
     log("--- [END SPAWN ERROR] ---");
     aiReady = false;
-    model_status = { status: "error", message: "Fatal error: Failed to start AI Core. Check main.log." };
+    model_status = { status: "error", message: "Fatal: Failed to start AI Core. Check main.log." };
     broadcastStatus();
   });
 
@@ -320,16 +477,15 @@ function startAIServer(useFastLoop = true) {
     const line = String(d).trim();
     log(`[AI Core STDERR]: ${line}`);
     if (/bad interpreter/i.test(line)) {
-        log("[main] DETECTED 'BAD INTERPRETER' ERROR. The Python virtual environment is likely broken.");
-        stopAIServer();
-        aiReady = false;
-        model_status = { status: "error", message: "Fatal error: Python environment is broken." };
-        broadcastStatus();
-        return;
+      log("[main] Python venv broken.");
+      stopAIServer();
+      aiReady = false;
+      model_status = { status: "error", message: "Fatal: Python environment is broken." };
+      broadcastStatus();
+      return;
     }
-    if (/Exit prior to config file resolving/i.test(line) || /call config\.load\(\) before reading values/i.test(line)) return;
     if (/(No module named 'uvloop'|No module named 'httptools')/i.test(line) && useFastLoop) {
-      log("[main] Missing uvloop/httptools — restarting without fast loop...");
+      log("[main] Missing uvloop/httptools — restarting without fast loop…");
       stopAIServer(); startAIServer(false); return;
     }
     if (/Error loading ASGI app|Could not import module/i.test(line)) {
@@ -354,8 +510,8 @@ function startAIServer(useFastLoop = true) {
   });
 }
 function stopAIServer() {
-  if (!aiProc) { log("[main.mjs] AI Core stop ignored: not running."); return; }
-  log("[main.mjs] Stopping AI Core…");
+  if (!aiProc) { log("[main] AI Core stop ignored: not running."); return; }
+  log("[main] Stopping AI Core…");
   try {
     if (process.platform === "win32") spawn("taskkill", ["/PID", String(aiProc.pid), "/T", "/F"]);
     else { try { process.kill(-aiProc.pid, "SIGTERM"); } catch { process.kill(aiProc.pid, "SIGTERM"); } }
@@ -417,7 +573,7 @@ function ensureOverlay(win) {
           o.style.cssText='position:fixed;left:8px;top:8px;z-index:2147483647;background:rgba(0,0,0,.65);color:#fff;padding:6px 8px;border-radius:6px;font:12px Menlo,monospace;pointer-events:none;display:none;';
           document.body.appendChild(o);
         }
-        window.__blurSetOverlay = function(txt){ try{ o.textContent = txt; }catch{} };
+        window.__blurSetOverlay = function(txt){ try{ o.style.display='block'; o.textContent = txt; }catch{} };
       }catch(e){}
     })();
   `;
@@ -446,7 +602,7 @@ function broadcastStatus() {
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1560, height: 1040, title: "Blur",
-    backgroundColor: "#000000", show: false, // <-- CHANGE #1
+    backgroundColor: "#000000", show: false,
     webPreferences: {
       preload: join(__dirname, "preload.mjs"),
       contextIsolation: true, nodeIntegration: false, sandbox: false,
@@ -455,76 +611,49 @@ async function createWindow() {
     },
   });
 
-  // ADD THIS BLOCK - CHANGE #2
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show();
-  });
+  mainWindow.on("ready-to-show", () => { mainWindow.show(); });
 
   try { app.dock && app.dock.show(); } catch {}
 
-  // console + errors -> log + overlay
+  // diagnostics
   mainWindow.webContents.on("console-message", (_e, level, message, line, sourceId) => {
     log(`[renderer:console][L${level}] ${message} (${sourceId}:${line})`);
-    // if (message) setOverlayText(mainWindow, String(message).slice(0, 140));
   });
   ipcMain.on("renderer:error", (_e, payload) => { log("[renderer:error]", payload); setOverlayText(mainWindow, `error: ${payload?.message||""}`); });
   ipcMain.on("renderer:unhandledRejection", (_e, payload) => { log("[renderer:unhandledRejection]", payload); setOverlayText(mainWindow, `rej: ${payload?.reason||""}`); });
 
-  // nav diagnostics
   mainWindow.webContents.on("did-start-navigation", (_e, url) => log("[nav] start:", url));
   mainWindow.webContents.on("did-finish-load", () => { log("[nav] finished"); ensureOverlay(mainWindow); });
   mainWindow.webContents.on("did-fail-load", (_e, ec, desc, url) => { log("[nav] fail:", ec, desc, url); setOverlayText(mainWindow, `nav fail: ${desc}`); });
   mainWindow.webContents.on("render-process-gone", (_e, d) => { log("[renderer gone]", d && d.reason); setOverlayText(mainWindow, `renderer gone: ${d?.reason}`); });
   mainWindow.webContents.on("unresponsive", () => { log("[renderer] unresponsive"); setOverlayText(mainWindow, "renderer unresponsive"); });
 
-  // immediate splash
   await loadSplash(mainWindow, model_status.message);
 
-  // ---- DEV LOAD with safe stop conditions ----
   if (!app.isPackaged) {
     let devReady = false;
     let attempts = 0;
     let timer = null;
 
     const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
-
     mainWindow.webContents.on("console-message", (_e, _lvl, message) => {
-      if (typeof message === "string" && message.includes("[vite] connected")) {
-        devReady = true;
-        stopTimer();
-      }
+      if (typeof message === "string" && message.includes("[vite] connected")) { devReady = true; stopTimer(); }
     });
 
     const tryLoad = async () => {
-      try {
-        await mainWindow.loadURL(DEV_URL);
-        ensureOverlay(mainWindow);
-        setOverlayText(mainWindow, "dev loaded");
-      } catch (e) {
-        log("[dev] loadURL error (initial):", e?.message || e);
-      }
+      try { await mainWindow.loadURL(DEV_URL); ensureOverlay(mainWindow); setOverlayText(mainWindow, "dev loaded"); }
+      catch (e) { log("[dev] loadURL error:", e?.message || e); }
     };
-
     await tryLoad();
 
     timer = setInterval(async () => {
       if (mainWindow?.isDestroyed()) return stopTimer();
       if (devReady) return stopTimer();
-
       attempts++;
-
       try {
-        const hasRoot = await mainWindow.webContents.executeJavaScript(
-          "!!document.querySelector('#root, #app, body > *')", true
-        );
-        if (hasRoot) return stopTimer();
+        const ok = await ping(DEV_URL);
+        if (ok && !devReady) await tryLoad();
       } catch {}
-
-      try {
-        await ping(DEV_URL);
-        if (!devReady) await tryLoad();
-      } catch {}
-
       if (attempts % 5 === 0) setOverlayText(mainWindow, `waiting dev… (${attempts})`);
     }, 1500);
 
@@ -577,23 +706,30 @@ if (!gotLock) {
     if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     initLogger();
     log(`[startup] userData = ${app.getPath("userData")}`);
     initPrefsIPC();
 
-    createWindow().catch(e => log("[main] createWindow error:", e));
+    // 🔑 1) Ensure BLUR_HOME (prefer ~/blur) and optionally unpack bundled resources if not using home
+    await ensureBlurHomeAndUnpack();
+
+    // 🔑 2) Ensure a config path exists (if none was provided)
+    bootstrapConfigIfMissing();
+
+    // 3) Create window (splash first), then start backend
+    await createWindow();
     startAIServer(true);
-    model_status = { status: "starting", message: "Initializing AI Core… (first run can take a bit)" };
+    model_status = { status: "starting", message: "Initializing AI Core… (first run may copy models)" };
     broadcastStatus();
 
+    // 4) wait for health
     (async () => {
       const started = Date.now();
       let ok = false;
       while (Date.now() - started < 60000) {
         try {
-          // Add a slightly longer delay before the first check
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          await new Promise(r => setTimeout(r, 1500));
           const res = await ping(CORE_HEALTH);
           if (res) { ok = true; break; }
         } catch {}

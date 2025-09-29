@@ -1,19 +1,27 @@
-# REFORGED v6.3 — Persistent RAG (+ Ephemeral UI RAG) + Mode-Locked Tone + Whisper + Multilingual + User Memory
-# - Singleton vessels (no re-init spam)
-# - Embedder n_ctx=512; quiet ggml logs
-# - Health is cheap; no model loads
-# - Retrieval = persistent ⊕ ephemeral ⊕ user memory
+#!/usr/bin/env python3
+# convo_chat_core.py — Reforged v7.1
+# - BLUR_HOME-first (no bundled fallbacks). All paths resolve via BLUR_HOME/BLUR_CONFIG_PATH.
+# - Chat vessel n_ctx SAFE-LOAD: backs off (requested → 8192 → 4096 → 2048 → 1024 → 512).
+# - Persistent RAG: strict JSONL↔FAISS ID alignment, tolerant rebuild, hot-reload/search endpoints.
+# - Ephemeral RAG + User memory unchanged.
+# - Whisper optional; quiet llama logs.
+# - Sessions: state under BLUR_HOME by default, legacy ~/.blur migration, autosave each turn + periodic.
 
 import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, base64, io, tempfile, random
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import numpy as np
 
-# Silence ggml/llama.cpp verbosity ASAP (before importing llama_cpp)
+# Quiet llama/ggml spam before import
 os.environ.setdefault("GGML_LOG_LEVEL", "WARN")
 
+# ---------- Third-party deps ----------
 from pydub import AudioSegment
-from faster_whisper import WhisperModel
+try:
+    from faster_whisper import WhisperModel
+except Exception:
+    WhisperModel = None  # lazy, optional
+
 from llama_cpp import Llama
 
 from fastapi import FastAPI, Request as FastAPIRequest
@@ -26,9 +34,9 @@ except Exception:
     ORJSONResponse = JSONResponse  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware
 
-# ---------- OPTIONAL DEPS (presence checks) ----------
+# ---------- OPTIONAL: multipart ----------
 try:
-    import multipart  # provided by python-multipart
+    import multipart  # python-multipart
     _HAS_MULTIPART = True
 except Exception:
     _HAS_MULTIPART = False
@@ -43,8 +51,26 @@ log = logging.getLogger("core")
 BLUR_HOME = os.path.expanduser(os.getenv("BLUR_HOME", "~/blur"))
 MANIFEST_PATH = os.path.expanduser(os.getenv("BLUR_CONFIG_PATH", os.path.join(BLUR_HOME, "config.yaml")))
 
-SESSIONS_FILE = os.path.expanduser("~/.blur/sessions.json")
-USER_MEMORY_FILE = os.path.expanduser("~/.blur/user_memory.json")
+# State lives alongside BLUR_HOME (Application Support/Blur by default)
+STATE_DIR = os.path.expanduser(os.getenv("BLUR_STATE_DIR", BLUR_HOME))
+Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
+SESSIONS_FILE = os.path.join(STATE_DIR, "sessions.json")
+USER_MEMORY_FILE = os.path.join(STATE_DIR, "user_memory.json")
+
+# Back-compat: migrate legacy ~/.blur/* → STATE_DIR on first run
+LEGACY_SESSIONS_FILE = os.path.expanduser("~/.blur/sessions.json")
+LEGACY_USER_MEMORY_FILE = os.path.expanduser("~/.blur/user_memory.json")
+try:
+    if os.path.exists(LEGACY_SESSIONS_FILE) and not os.path.exists(SESSIONS_FILE):
+        with open(LEGACY_SESSIONS_FILE, "r") as f_in, open(SESSIONS_FILE, "w") as f_out:
+            f_out.write(f_in.read())
+        logging.info(f"Migrated legacy sessions.json → {SESSIONS_FILE}")
+    if os.path.exists(LEGACY_USER_MEMORY_FILE) and not os.path.exists(USER_MEMORY_FILE):
+        with open(LEGACY_USER_MEMORY_FILE, "r") as f_in, open(USER_MEMORY_FILE, "w") as f_out:
+            f_out.write(f_in.read())
+        logging.info(f"Migrated legacy user_memory.json → {USER_MEMORY_FILE}")
+except Exception as e:
+    logging.error(f"Legacy migration failed: {e}")
 
 DEFAULT_HISTORY_TURNS_FOR_PROMPT = 24
 DEFAULT_KEEP_HISTORY = 100
@@ -52,23 +78,27 @@ DEFAULT_KEEP_HISTORY = 100
 manifest: Dict[str, Any] = {}
 homes: Dict[str, str] = {}
 
-# Vessel registry + lock (prevents duplicate loads)
+# Vessel registry + locks
 _VESSEL_LOCK = asyncio.Lock()
 llm_vessels: Dict[str, Llama] = {}
 vessel_details: Dict[str, Dict[str, Any]] = {}
 sessions: Dict[str, Dict[str, Any]] = {}
 last_seen_session_id: Optional[str] = None
 
-# Embedding (GGUF via llama.cpp) — singleton
+# Embedding singleton
 _embed_lock = asyncio.Lock()
 _embed_llm: Optional[Llama] = None
 _embed_dim: Optional[int] = None
+
+# Autosave
+_AUTOSAVE_TASK: Optional[asyncio.Task] = None
+_AUTOSAVE_EVERY_SEC = int(os.getenv("BLUR_AUTOSAVE_SEC", "10"))
 
 # ---------- USER MEMORY ----------
 user_memory_chunks: Dict[str, List[Dict[str, Any]]] = {}
 user_memory_lock = threading.Lock()
 MAX_USER_MEMORY_CHUNKS = 50
-USER_MEMORY_TTL_DAYS = 90
+USER_MEMORY_TTL_DAYS = 90  # reserved; not enforced here
 
 # ---------- EPHEMERAL UI RAG ----------
 EPHEMERAL_RAG_ENABLED = True
@@ -102,36 +132,12 @@ MODE_SEEDS = {
 
 # ---------- APP ----------
 app = FastAPI(default_response_class=ORJSONResponse)
-RESOURCES_DIRS = [
-    "/Applications/Blur.app/Contents/Resources",
-    os.path.join(os.getcwd(), "Contents", "Resources"),
-]
-IS_PACKAGED = any(os.path.exists(os.path.join(d, "BLUR_PACKAGED")) for d in RESOURCES_DIRS) or os.getenv("BLUR_PACKAGED") == "1"
-if IS_PACKAGED:
+
+# CORS: allow renderer locally or packed
+if os.getenv("BLUR_PACKAGED") == "1":
     app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID"])
 else:
-    app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:6969", "http://127.0.0.1:6969"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID"])
-
-# ---------- PACKAGED FALLBACKS ----------
-def _first_existing(paths: List[str]) -> Optional[str]:
-    for p in paths:
-        if p and os.path.exists(p):
-            return p
-    return None
-
-BUNDLED_ROOT = _first_existing([os.path.join(d, "blur_bundle") for d in RESOURCES_DIRS]) if IS_PACKAGED else None
-
-if IS_PACKAGED and BUNDLED_ROOT:
-    if not os.getenv("BLUR_CONFIG_PATH"):
-        MANIFEST_PATH = os.path.join(BUNDLED_ROOT, "config.yaml")
-    if not os.getenv("BLUR_WHISPER_ROOT"):
-        WHISPER_ROOT = os.path.join(BUNDLED_ROOT, "models", "whisper")
-        WHISPER_MODEL_DIR = os.path.join(WHISPER_ROOT, "medium.en-ct2")
-    _RAG_IDX_DEFAULT    = os.path.join(BUNDLED_ROOT, "core", "ouinet", "blurchive", "ecosystem", "blur_knowledge.index")
-    _RAG_CHUNKS_DEFAULT = os.path.join(BUNDLED_ROOT, "core", "ouinet", "blurchive", "ecosystem", "knowledge_chunks.jsonl")
-else:
-    _RAG_IDX_DEFAULT    = os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "blur_knowledge.index")
-    _RAG_CHUNKS_DEFAULT = os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "knowledge_chunks.jsonl")
+    app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:6969","http://127.0.0.1:6969"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID"])
 
 # ---------- CFG HELPERS ----------
 def get_cfg(path: str, default=None):
@@ -146,15 +152,14 @@ def resolve_path(path_str: str, homes_dict: dict):
     if not isinstance(path_str, str):
         return path_str
     s = path_str
-    for _ in range(6):  # multi-pass to handle nested refs
+    for _ in range(6):
         prev = s
         for k, v in (homes_dict or {}).items():
             s = s.replace(f'${{meta.homes.{k}}}', str(v))
         s = s.replace("${BLUR_HOME}", BLUR_HOME)
         s = os.path.expandvars(s)
         s = os.path.expanduser(s)
-        if s == prev:
-            break
+        if s == prev: break
     return s
 
 def resolve_homes_recursive(h: dict) -> dict:
@@ -163,13 +168,12 @@ def resolve_homes_recursive(h: dict) -> dict:
         out[k] = resolve_path(str(v), h)
     return out
 
-# ---------- EMBEDDING (singleton, quiet) ----------
+# ---------- EMBEDDING (singleton) ----------
 def _ensure_embedder():
-    """Idempotent embedder init (embedding=True, n_ctx=512)."""
+    """Idempotent embedder init (embedding=True, conservative n_ctx=512)."""
     global _embed_llm
     if _embed_llm is not None:
         return
-    # prefer explicit vector_store.embed_model, else fall back to manifest 'models'
     model_key = (get_cfg("memory.vector_store.embed_model", "snowflake_arctic_embed") or "snowflake_arctic_embed")
     model_cfg = (manifest.get("models", {}) or {}).get(model_key, {})
     model_path = resolve_path(model_cfg.get("path", ""), homes)
@@ -178,7 +182,7 @@ def _ensure_embedder():
     _embed_llm = Llama(
         model_path=model_path,
         embedding=True,
-        n_ctx=512,             # keep <= train ctx; quiets warnings, faster
+        n_ctx=512,  # embed models don't need large ctx
         n_gpu_layers=int(get_cfg("engines.llama_cpp.n_gpu_layers", 0)),
         logits_all=False,
         verbose=False,
@@ -190,20 +194,24 @@ def _embedding_dim() -> int:
     if _embed_dim is not None:
         return _embed_dim
     _ensure_embedder()
-    # llama.cpp python: create_embedding(str|list[str]) -> { "data":[{"embedding":[...]}], ... }
     probe = _embed_llm.create_embedding("dim?")['data'][0]['embedding']  # type: ignore
     _embed_dim = len(probe)
     return _embed_dim
 
 def _encode(texts: List[str]) -> np.ndarray:
     _ensure_embedder()
-    vecs = _embed_llm.create_embedding(texts)['data']  # type: ignore
-    arr = np.asarray([d['embedding'] for d in vecs], dtype="float32")
+    out = _embed_llm.create_embedding(texts)['data']  # type: ignore
+    arr = np.asarray([d['embedding'] for d in out], dtype="float32")
     faiss.normalize_L2(arr)
     return arr
 
 # ---------- PERSISTENT RAG ----------
 class PersistentRAG:
+    """
+    JSONL rows require an 'id' that *matches* FAISS ids.
+    On load:
+      - If an index exists and ids mismatch, rebuild from JSONL so future ids are aligned.
+    """
     def __init__(self, index_path: str, chunks_path: str, ttl_days: int = 0, auto_compact: bool = False):
         self.index_path = Path(index_path)
         self.chunks_path = Path(chunks_path)
@@ -212,7 +220,7 @@ class PersistentRAG:
         self.lock = threading.Lock()
         self.index: Optional[faiss.Index] = None
         self.chunks: List[Dict[str, Any]] = []
-        self.max_id: int = 0
+        self.max_id: int = -1
 
     def _read_jsonl(self) -> List[Dict[str, Any]]:
         if not self.chunks_path.exists():
@@ -221,8 +229,7 @@ class PersistentRAG:
         with self.chunks_path.open("r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line:
-                    continue
+                if not line: continue
                 try:
                     out.append(json.loads(line))
                 except Exception:
@@ -247,46 +254,73 @@ class PersistentRAG:
         kept = [r for r in rows if int(r.get("ts", 0)) >= cutoff]
         return kept or rows
 
+    def _assign_sequential_ids_if_missing(self, rows: List[Dict[str, Any]]) -> None:
+        any_missing = False
+        for i, r in enumerate(rows):
+            if "id" not in r:
+                r["id"] = i
+                any_missing = True
+        if any_missing:
+            self._write_jsonl(rows)
+
+    def _ids_from_index(self, idx: faiss.Index) -> Optional[np.ndarray]:
+        try:
+            return faiss.vector_to_array(idx.id_map)  # type: ignore[attr-defined]
+        except Exception:
+            return None
+
+    def _save_index(self):
+        if self.index is None: return
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.index, str(self.index_path))
+
+    def _rebuild_from_rows(self, rows: List[Dict[str, Any]]):
+        self.index = self._new_index()
+        texts = [r.get("content","") for r in rows]
+        vecs = _encode(texts)
+        ids_arr = np.asarray([int(r["id"]) for r in rows], dtype="int64")
+        self.index.add_with_ids(vecs, ids_arr)
+        self._save_index()
+
     def load(self):
         with self.lock:
             rows = self._read_jsonl()
             if self.auto_compact:
                 rows = self._compact_by_ttl(rows)
 
-            for r in rows:
-                if "id" not in r:
-                    self.max_id += 1
-                    r["id"] = self.max_id
-                else:
-                    self.max_id = max(self.max_id, int(r["id"]))
+            self._assign_sequential_ids_if_missing(rows)
+            self.max_id = max([int(r["id"]) for r in rows], default=-1)
 
+            need_rebuild = True
             try:
                 if self.index_path.exists():
                     idx = faiss.read_index(str(self.index_path))
                     if isinstance(idx, faiss.IndexIDMap2):
-                        self.index = idx
-                        self.chunks = sorted(rows, key=lambda r: int(r["id"]))
-                        logging.info(f"✅ Persistent RAG index loaded: {self.index.ntotal} vectors")
-                        return
+                        faiss_ids = self._ids_from_index(idx)
+                        if faiss_ids is not None and len(faiss_ids) == len(rows):
+                            order = list(map(int, faiss_ids))
+                            by_id = {int(r["id"]): r for r in rows}
+                            rows = [by_id[i] for i in order if i in by_id]
+                            self.max_id = int(max(faiss_ids)) if len(faiss_ids) else -1
+                            self.index = idx
+                            need_rebuild = False
+                            logging.info(f"✅ Persistent RAG index loaded: {self.index.ntotal} vectors")
+                        else:
+                            logging.warning("[persistent-rag] id/count mismatch; will rebuild")
+                    else:
+                        logging.warning("[persistent-rag] index not IDMap2; will rebuild")
             except Exception as e:
-                logging.warning(f"[persistent-rag] index read failed, rebuilding: {e}")
+                logging.warning(f"[persistent-rag] index read failed ({e}); will rebuild")
 
-            self.index = self._new_index()
-            self.chunks = sorted(rows, key=lambda r: int(r["id"]))
-            if not self.chunks:
-                self._save_index(); return
-            texts = [r.get("content","") for r in self.chunks]
-            vecs = _encode(texts)
-            ids_arr = np.asarray([int(r["id"]) for r in self.chunks], dtype="int64")
-            self.index.add_with_ids(vecs, ids_arr)
-            self._save_index()
-            logging.info(f"✅ Persistent RAG rebuilt: {self.index.ntotal} vectors")
-
-    def _save_index(self):
-        if self.index is None:
-            return
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(self.index, str(self.index_path))
+            self.chunks = rows
+            if need_rebuild:
+                if not self.chunks:
+                    self.index = self._new_index()
+                    self._save_index()
+                    logging.info("✅ Persistent RAG created (empty).")
+                else:
+                    self._rebuild_from_rows(self.chunks)
+                    logging.info(f"✅ Persistent RAG rebuilt: {len(self.chunks)} vectors")
 
     def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         with self.lock:
@@ -298,13 +332,13 @@ class PersistentRAG:
             out = []
             idx_by_id = {int(r["id"]): r for r in self.chunks}
             for id_ in I[0]:
-                if int(id_) in idx_by_id:
-                    out.append(idx_by_id[int(id_)])
+                r = idx_by_id.get(int(id_))
+                if r:
+                    out.append(r)
             return out
 
     def add_rows(self, rows: List[Dict[str, Any]]) -> int:
-        if not rows:
-            return 0
+        if not rows: return 0
         with self.lock:
             for r in rows:
                 self.max_id += 1
@@ -315,18 +349,16 @@ class PersistentRAG:
                 self.index = self._new_index()
             self.index.add_with_ids(vecs, ids_arr)
             self.chunks.extend(rows)
-            self.chunks.sort(key=lambda r: int(r["id"]))
             self._write_jsonl(self.chunks)
             self._save_index()
             return len(rows)
 
 persistent_rag: Optional[PersistentRAG] = None
 
-# ---------- USER MEMORY HELPERS ----------
+# ---------- USER MEMORY ----------
 def _chunk_memory_text(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
     text = re.sub(r'\s+', ' ', text).strip()
-    if not text:
-        return []
+    if not text: return []
     chunks, i = [], 0
     while i < len(text):
         j = min(len(text), i + chunk_size)
@@ -407,8 +439,7 @@ def _read_file_bytes(file_bytes: bytes, filename: str) -> str:
 
 def _chunk_text(s: str, chunk_size: int = 1600, overlap: int = 200) -> List[str]:
     s = re.sub(r"\s+", " ", s).strip()
-    if not s:
-        return []
+    if not s: return []
     chunks, i = [], 0
     while i < len(s):
         j = min(len(s), i + chunk_size)
@@ -445,7 +476,7 @@ def _evict_and_ttl_gc(session_id: Optional[str] = None):
         knowledge_chunks = sorted(knowledge_chunks, key=lambda x: x.get("ts", 0))[drop_n:]
     _rebuild_index_from_chunks()
 
-# ---------- LANG DETECTION ----------
+# ---------- LANGUAGE DETECTION ----------
 try:
     from langdetect import detect as _ld_detect
     from langdetect import DetectorFactory as _LDFactory
@@ -454,18 +485,28 @@ try:
 except Exception:
     _HAS_LANGDETECT = False
 
-_LANG_CODE_TO_NAME = {"en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian","nl":"Dutch","sv":"Swedish","pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian","tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian","hi":"Hindi","bn":"Bengali","ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai","vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean","zh-cn":"Chinese","zh-tw":"Chinese (Traditional)"}  # noqa
+_LANG_CODE_TO_NAME = {
+    "en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian","nl":"Dutch","sv":"Swedish",
+    "pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian","tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian",
+    "hi":"Hindi","bn":"Bengali","ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai",
+    "vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean","zh-cn":"Chinese","zh-tw":"Chinese (Traditional)"
+}
+
+_SLANG_EN_GREETINGS = re.compile(r"^(yo+|ye+|ya+|sup|wass?up|ayy+|hey+|hiya)\b", re.I)
 
 def detect_language_name(text: str) -> str:
+    t = (text or "").strip()
+    if not t or len(t) <= 3 or _SLANG_EN_GREETINGS.match(t):
+        return "English"
+    if re.fullmatch(r"[ -~\s]+", t) and len(t.split()) <= 4:
+        return "English"
     if _HAS_LANGDETECT:
         try:
-            code = _ld_detect(text or "hello")
-            if code == "zh":
-                code = "zh-cn"
+            code = _ld_detect(t)
+            if code == "zh": code = "zh-cn"
             return _LANG_CODE_TO_NAME.get(code, "English")
         except Exception:
             pass
-    t = (text or "")
     if re.search(r"[\u3040-\u30FF\u4E00-\u9FFF]", t): return "Japanese"
     if re.search(r"[\uAC00-\uD7A3]", t): return "Korean"
     if re.search(r"[\u0590-\u05FF]", t): return "Hebrew"
@@ -473,19 +514,29 @@ def detect_language_name(text: str) -> str:
     return "English"
 
 def language_hysteresis_update_lang(session: dict, user_text: str) -> str:
-    cfg_n = int(get_cfg("language.hysteresis_consecutive", 2) or 2)
+    cfg_n = int(get_cfg("language.hysteresis_consecutive", 3) or 3)
     default_lang = get_cfg("language.default_if_unknown", "English")
+    if len((user_text or "").strip()) <= 3:
+        session.setdefault("active_lang", default_lang)
+        session["last_seen_lang"] = default_lang
+        session["lang_streak"] = 0
+        return session["active_lang"]
     current = detect_language_name(user_text) or default_lang
-    active = session.get("active_lang", default_lang)
-    last_seen = session.get("last_seen_lang", current)
-    streak = int(session.get("lang_streak", 0))
+    active  = session.get("active_lang", default_lang)
+    last    = session.get("last_seen_lang", current)
+    streak  = int(session.get("lang_streak", 0))
     if current == active:
-        session["last_seen_lang"] = current; session["lang_streak"]=0; return active
-    streak = streak+1 if current == last_seen else 1
-    session["last_seen_lang"]=current; session["lang_streak"]=streak
+        session["last_seen_lang"] = current
+        session["lang_streak"] = 0
+        return active
+    streak = streak + 1 if current == last else 1
+    session["last_seen_lang"] = current
+    session["lang_streak"] = streak
     if streak >= cfg_n:
-        session["active_lang"]=current; session["lang_streak"]=0; return current
-    session["active_lang"]=active; return active
+        session["active_lang"] = current
+        session["lang_streak"] = 0
+        return current
+    return active
 
 # ---------- STYLE / SANITIZE ----------
 def sanitize_for_audience(text: str, audience: str) -> str:
@@ -565,9 +616,41 @@ def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Opt
 
     return "\n\n".join(parts).strip()
 
+# ---------- SAFE LOAD LLM (auto ctx backoff) ----------
+def _try_load_llama(model_path: str, desired_ctx: int, n_gpu_layers: int) -> Optional[Llama]:
+    try:
+        return Llama(
+            model_path=model_path,
+            n_ctx=int(desired_ctx),
+            n_gpu_layers=int(n_gpu_layers),
+            embedding=False,
+            logits_all=False,
+            verbose=False,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "n_ctx_per_seq" in msg or "n_ctx_train" in msg or "context overflow" in msg:
+            return None
+        raise
+
+def _load_llama_with_backoff(model_path: str, requested_ctx: int, n_gpu_layers: int) -> Llama:
+    ladder = [requested_ctx, 8192, 4096, 2048, 1024, 512]
+    tried = []
+    for ctx in ladder:
+        if ctx in tried: continue
+        tried.append(ctx)
+        llm = _try_load_llama(model_path, ctx, n_gpu_layers)
+        if llm:
+            logging.info(f"[models] Loaded with n_ctx={ctx} (requested={requested_ctx})")
+            return llm
+    raise RuntimeError(
+        f"Failed to load model at {model_path} — context too large for training window. "
+        f"Tried ctx={tried}. Lower engines.llama_cpp.python_n_ctx in config.yaml."
+    )
+
 # ---------- MODELS ----------
 def load_llm_from_config(model_config: dict, model_key: str) -> bool:
-    """Idempotent: will not reload the same model_key."""
+    """Idempotent: avoids reloading."""
     if model_key in llm_vessels:
         return True
     if not isinstance(model_config, dict):
@@ -584,21 +667,12 @@ def load_llm_from_config(model_config: dict, model_key: str) -> bool:
         logging.error("Model not found: %s", model_path)
         return False
 
-    # Only actual chat/decoder models run with embedding=False here.
-    # We leave embeddings to the singleton embedder above.
-    is_embed = False
-
     try:
-        llm = Llama(
-            model_path=model_path,
-            n_ctx=int(get_cfg("engines.llama_cpp.python_n_ctx", 8192)),
-            n_gpu_layers=int(get_cfg("engines.llama_cpp.n_gpu_layers", 0)),
-            embedding=is_embed,
-            logits_all=False,
-            verbose=False,
-        )
+        requested_n_ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 8192))
+        n_gpu_layers = int(get_cfg("engines.llama_cpp.n_gpu_layers", 0))
+        llm = _load_llama_with_backoff(model_path, requested_n_ctx, n_gpu_layers)
         llm_vessels[model_key] = llm
-        vessel_details[model_key] = {"family": family, "params": model_config.get("params", {})}
+        vessel_details[model_key] = {"family": family, "params": model_config.get("params", {}), "n_ctx": requested_n_ctx}
         logging.info("Vessel '%s' online (%s)", model_key, family or "chat")
         return True
     except Exception as e:
@@ -632,7 +706,8 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
     chat_llm = llm_vessels.get(chat_key)
     if not chat_llm:
-        yield f"Model not loaded."; return
+        yield "Model not loaded."
+        return
 
     context = retrieve_context_blend(user_text, session.get("id"), None, session.get("username") or request.username, top_k=5)
     audience = (session.get("audience") or get_cfg("release.audience_default","internal")).lower()
@@ -663,7 +738,8 @@ async def generate_response_stream(session: Dict, request: RequestModel):
             yield safe_piece
     except Exception as e:
         logging.error("Generation error: %s", e)
-        yield "Internal error."; return
+        yield "Internal error."
+        return
 
     final_text = (response_text.strip() or "…")
     if mode == "dream":
@@ -681,7 +757,13 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
     session["turn"] = int(session.get("turn", 0)) + 1
 
-# ---------- INGEST ROUTES ----------
+    # autosave immediately
+    try:
+        save_sessions()
+    except Exception:
+        logging.error("autosave sessions failed", exc_info=True)
+
+# ---------- INGEST ROUTES (ephemeral) ----------
 if _HAS_MULTIPART:
     @app.post("/rag/ingest")
     async def rag_ingest(
@@ -748,10 +830,48 @@ if _HAS_MULTIPART:
         except Exception as e:
             logging.error("RAG ingest error: %s", e)
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+else:
+    @app.post("/rag/ingest")
+    async def rag_ingest_unavailable():
+        return JSONResponse({"ok": False,"error": "File upload endpoint unavailable: install python-multipart","pip": "pip install python-multipart"}, status_code=503)
+
+# ---------- PERSISTENT RAG ROUTES ----------
+@app.get("/persistent/status")
+def persistent_status():
+    pv = persistent_rag.index.ntotal if (persistent_rag and persistent_rag.index) else 0
+    return {
+        "ok": True,
+        "vectors": pv,
+        "index_path": getattr(persistent_rag, "index_path", None) and str(persistent_rag.index_path),
+        "chunks_path": getattr(persistent_rag, "chunks_path", None) and str(persistent_rag.chunks_path),
+    }
+
+@app.post("/persistent/reload")
+def persistent_reload():
+    try:
+        if persistent_rag:
+            persistent_rag.load()
+            return {"ok": True, "vectors": persistent_rag.index.ntotal if persistent_rag.index else 0}
+        return {"ok": False, "error": "persistent_rag not configured"}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/persistent/search")
+def persistent_search(q: str, k: int = 5):
+    try:
+        if not persistent_rag: return {"ok": True, "results": []}
+        rows = persistent_rag.search(q, top_k=int(k))
+        return {"ok": True, "results": rows}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 # ---------- ASR ----------
 def _init_whisper():
     global whisper_model
+    if WhisperModel is None:
+        logging.info("Whisper unavailable (faster-whisper not installed).")
+        whisper_model = None
+        return
     try:
         if os.path.isdir(WHISPER_MODEL_DIR) and os.path.exists(os.path.join(WHISPER_MODEL_DIR, "config.json")):
             logging.info(f"🎙️ Loading faster-whisper from local dir: {WHISPER_MODEL_DIR}")
@@ -806,11 +926,10 @@ def healthz():
         "chat_key": get_cfg("chat.vessel_key", "qwen3_4b_unified"),
         "paths": {
             "BLUR_HOME": BLUR_HOME,
+            "STATE_DIR": STATE_DIR,
             "MANIFEST_PATH": MANIFEST_PATH,
             "WHISPER_ROOT": WHISPER_ROOT,
             "WHISPER_MODEL_DIR": WHISPER_MODEL_DIR,
-            "RAG_INDEX_DEFAULT": _RAG_IDX_DEFAULT,
-            "RAG_CHUNKS_DEFAULT": _RAG_CHUNKS_DEFAULT,
         },
         "multipart": _HAS_MULTIPART,
     }
@@ -821,7 +940,7 @@ async def get_new_session():
     sid = str(uuid.uuid4())
     sessions[sid] = {
         "id": sid,
-        "mode": "dream", 
+        "mode": "dream",
         "history": [],
         "turn": 0,
         "username": None,
@@ -865,32 +984,134 @@ async def get_status():
     }
 
 # ---------- PERSISTENCE ----------
+STATE_DIR = os.path.expanduser(os.getenv("BLUR_STATE_DIR", "~/.blur"))
+SESSIONS_FILE = os.path.join(STATE_DIR, "sessions.json")
+USER_MEMORY_FILE = os.path.join(STATE_DIR, "user_memory.json")
+
+def _ensure_state_dir():
+    try:
+        Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Failed to create state dir {STATE_DIR}: {e}")
+
 def load_sessions():
+    """Load sessions from disk and normalize fields."""
     global sessions
-    Path(SESSIONS_FILE).parent.mkdir(parents=True, exist_ok=True)
+    _ensure_state_dir()
     if os.path.exists(SESSIONS_FILE):
         try:
-            with open(SESSIONS_FILE, 'r') as f:
+            with open(SESSIONS_FILE, "r") as f:
                 loaded = json.load(f)
-            for sid, data in loaded.items():
-                hist = data.get('history', [])
-                data['history'] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)):] if isinstance(hist, list) else []
-                data.setdefault('username', None)
-                data.setdefault('wants', {"tone":"dream","defaultMode":"dream","ragAutoIngest":True})
-                data.setdefault('audience', get_cfg("release.audience_default","internal"))
-                data.setdefault('turn', len(data['history']))
+            sessions = {}
+            keep_n = int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))
+            for sid, data in (loaded or {}).items():
+                hist = data.get("history", [])
+                if isinstance(hist, list):
+                    data["history"] = hist[-keep_n:]
+                else:
+                    data["history"] = []
+                data.setdefault("username", None)
+                data.setdefault("wants", {"tone": "dream", "defaultMode": "dream", "ragAutoIngest": True})
+                data.setdefault("audience", get_cfg("release.audience_default", "internal"))
+                data.setdefault("turn", len(data["history"]))
                 sessions[sid] = data
-            logging.info("Loaded %d sessions", len(sessions))
+            logging.info("Loaded %d sessions from %s", len(sessions), SESSIONS_FILE)
         except Exception as e:
-            logging.error("Failed to load sessions: %s", e); sessions = {}
+            logging.error("Failed to load sessions: %s", e)
+            sessions = {}
+    else:
+        sessions = {}
 
 def save_sessions():
+    """Persist sessions atomically to avoid tearing."""
     try:
-        Path(SESSIONS_FILE).parent.mkdir(parents=True, exist_ok=True)
-        with open(SESSIONS_FILE, 'w') as f:
+        _ensure_state_dir()
+        tmp = SESSIONS_FILE + ".tmp"
+        with open(tmp, "w") as f:
             json.dump(sessions, f, indent=2)
+        os.replace(tmp, SESSIONS_FILE)
     except Exception as e:
         logging.error("Failed to save sessions: %s", e)
+
+# ---------- AS YOU STREAM, APPEND + AUTOSAVE ----------
+# (keep this inside generate_response_stream — shown here for context)
+# hist = session.setdefault("history", [])
+# hist.append({"user": user_text, "assistant": final_text})
+# session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
+# session["turn"] = int(session.get("turn", 0)) + 1
+# try:
+#     save_sessions()
+# except Exception:
+#     logging.error("autosave sessions failed", exc_info=True)
+
+# ---------- OPTIONAL: USER MEMORY ENDPOINTS ----------
+class MemoryUpsert(BaseModel):
+    user: str
+    text: str
+
+@app.post("/memory/upsert")
+def memory_upsert(payload: MemoryUpsert):
+    """Simple append to user memory; chunks automatically derived."""
+    if not payload.user or not payload.text.strip():
+        return JSONResponse({"ok": False, "error": "user and text required"}, status_code=400)
+    chunks = _chunk_memory_text(payload.text.strip())
+    if not chunks:
+        return {"ok": True, "added": 0}
+    with user_memory_lock:
+        arr = user_memory_chunks.setdefault(payload.user, [])
+        now = int(time.time())
+        for ch in chunks:
+            arr.append({"content": ch, "ts": now})
+        # cap + TTL trim
+        cutoff = now - USER_MEMORY_TTL_DAYS * 86400
+        arr[:] = [r for r in arr[-MAX_USER_MEMORY_CHUNKS:] if r.get("ts", 0) >= cutoff]
+    try:
+        save_user_memory()
+    except Exception:
+        logging.error("Failed to save user memory", exc_info=True)
+    return {"ok": True, "added": len(chunks)}
+
+# ---------- DEBUG / DIAGNOSTICS ----------
+@app.get("/debug/paths")
+def debug_paths():
+    chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
+    return {
+        "BLUR_HOME": BLUR_HOME,
+        "MANIFEST_PATH": MANIFEST_PATH,
+        "STATE_DIR": STATE_DIR,
+        "SESSIONS_FILE": SESSIONS_FILE,
+        "USER_MEMORY_FILE": USER_MEMORY_FILE,
+        "chat_key": chat_key,
+        "known_vessels": list(llm_vessels.keys()),
+        "embed_model_path": resolve_path((manifest.get("models", {}) or {}).get(
+            get_cfg("memory.vector_store.embed_model", "snowflake_arctic_embed"), {}
+        ).get("path", ""), homes),
+        "persistent": {
+            "index": getattr(persistent_rag, "index_path", None) and str(persistent_rag.index_path),
+            "chunks": getattr(persistent_rag, "chunks_path", None) and str(persistent_rag.chunks_path),
+            "vectors": (persistent_rag.index.ntotal if (persistent_rag and persistent_rag.index) else 0),
+        },
+    }
+
+@app.get("/config/current")
+def config_current():
+    """Return the resolved manifest (safe subset) + key params to confirm tone diffs."""
+    return {
+        "manifest_path": MANIFEST_PATH,
+        "chat": manifest.get("chat", {}),
+        "range_modes": {
+            k: {"params": v.get("params", {}), "endings": v.get("endings", [])}
+            for k, v in (manifest.get("range", {}).get("modes", {}) or {}).items()
+        },
+        "assembly": {
+            "history_turns": get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT),
+            "keep_history": get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY),
+        },
+        "language": {
+            "hysteresis_consecutive": get_cfg("language.hysteresis_consecutive", 3),
+            "default_if_unknown": get_cfg("language.default_if_unknown", "English"),
+        },
+    }
 
 # ---------- STARTUP / SHUTDOWN ----------
 @app.on_event("startup")
@@ -898,6 +1119,9 @@ async def startup_event():
     global manifest, homes, rag_index, persistent_rag
     logging.info(f"Startup: loading manifest: {MANIFEST_PATH}")
     try:
+        # ensure state dir exists early
+        _ensure_state_dir()
+
         if not os.path.exists(MANIFEST_PATH):
             logging.error(f"🛑 FATAL: Manifest file not found at '{MANIFEST_PATH}'. Core will not start.")
             raise FileNotFoundError(f"Manifest file not found at the required path: {MANIFEST_PATH}")
@@ -905,7 +1129,7 @@ async def startup_event():
         with open(MANIFEST_PATH, 'r') as f:
             manifest = yaml.safe_load(f) or {}
 
-        # Ensure explicit chat key exists (safe default)
+        # default chat key
         manifest.setdefault("chat", {}).setdefault("vessel_key", "qwen3_4b_unified")
 
         homes_local = (manifest.get('meta', {}) or {}).get('homes', {}) or {}
@@ -923,14 +1147,14 @@ async def startup_event():
             finally:
                 _VESSEL_LOCK.release()
 
-        # Chat vessel ready?
+        # chat vessel check
         chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
         if chat_key not in llm_vessels:
             logging.error(f"🛑 Chat vessel '{chat_key}' not loaded. Known vessels: {list(llm_vessels.keys())}")
         else:
             logging.info(f"✅ Chat vessel ready: {chat_key}")
 
-        # Embedder + ephemeral idx
+        # embedder + ephemeral idx
         await _embed_lock.acquire()
         try:
             _ensure_embedder()
@@ -938,25 +1162,23 @@ async def startup_event():
             _embed_lock.release()
         rag_index = faiss.IndexFlatIP(_embedding_dim())
 
-        # Persistent RAG init
-        idx_path = resolve_path(get_cfg("memory.vector_store.path", ""), homes) or _RAG_IDX_DEFAULT
-        ch_path  = resolve_path(get_cfg("memory.vector_store.chunks_path", ""), homes) or _RAG_CHUNKS_DEFAULT
+        # Persistent RAG init (BLUR_HOME-first)
+        idx_path = resolve_path(get_cfg("memory.vector_store.path", ""), homes) or os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "blur_knowledge.index")
+        ch_path  = resolve_path(get_cfg("memory.vector_store.chunks_path", ""), homes) or os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "knowledge_chunks.jsonl")
         ttl_days = int(get_cfg("memory.vector_store.ttl_days_persistent", 0) or 0)
         auto_compact = bool(get_cfg("memory.vector_store.auto_compact_on_start", False))
-        if idx_path and ch_path:
-            persistent_rag_local = PersistentRAG(index_path=idx_path, chunks_path=ch_path, ttl_days=ttl_days, auto_compact=auto_compact)
-            try:
-                persistent_rag_local.load()
-                persistent_rag = persistent_rag_local
-                logging.info(f"Persistent store: index='{idx_path}', chunks='{ch_path}'")
-            except Exception as e:
-                logging.error(f"Persistent RAG load failed: {e}")
-                persistent_rag = persistent_rag_local
+        persistent_rag_local = PersistentRAG(index_path=idx_path, chunks_path=ch_path, ttl_days=ttl_days, auto_compact=auto_compact)
+        try:
+            persistent_rag_local.load()
+        except Exception as e:
+            logging.error(f"Persistent RAG load failed: {e}")
+        persistent_rag = persistent_rag_local
+        logging.info(f"Persistent store: index='{idx_path}', chunks='{ch_path}'")
 
         load_sessions()
         load_user_memory()
         _init_whisper()
-        logging.info("Core-Lite + Persistent RAG ready.")
+        logging.info("Core ready (v7.1).")
     except Exception as e:
         logging.error(f"FATAL on startup: {e}")
         raise e
@@ -970,4 +1192,4 @@ def shutdown_event():
 # ---------- MAIN ----------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("BLUR_CORE_PORT", "8000")))
