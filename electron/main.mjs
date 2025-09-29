@@ -446,13 +446,18 @@ function broadcastStatus() {
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1560, height: 1040, title: "Blur",
-    backgroundColor: "#000000", show: true,
+    backgroundColor: "#000000", show: false, // <-- CHANGE #1
     webPreferences: {
       preload: join(__dirname, "preload.mjs"),
       contextIsolation: true, nodeIntegration: false, sandbox: false,
       webSecurity: false, allowRunningInsecureContent: true,
       backgroundThrottling: false,
     },
+  });
+
+  // ADD THIS BLOCK - CHANGE #2
+  mainWindow.on('ready-to-show', () => {
+    mainWindow.show();
   });
 
   try { app.dock && app.dock.show(); } catch {}
