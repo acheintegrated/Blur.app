@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* enable MD typography */
+@plugin "@tailwindcss/typography";
+
 /* include root index.html */
 @source "../index.html";
 

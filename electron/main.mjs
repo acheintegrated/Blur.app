@@ -1,4 +1,5 @@
-// electron/main.mjs — REFORGED v10.3 (sleep-safe + defensive saves)
+// electron/main.mjs — REFORGED v10.6
+// (sleep-safe + defensive saves + healthz IPC + OG config only + silent dev overlay)
 import { app, BrowserWindow, shell, ipcMain, globalShortcut, powerMonitor } from "electron";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
@@ -20,6 +21,9 @@ const __dirname = dirname(__filename);
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("allow-running-insecure-content");
 app.commandLine.appendSwitch("disable-features", "OutOfBlinkCors");
+
+// Overlay is OFF by default; set BLUR_DEBUG_OVERLAY=1 to enable.
+const SHOW_OVERLAY = !!process.env.BLUR_DEBUG_OVERLAY;
 
 /* ============================================================================
    GLOBALS
@@ -141,6 +145,7 @@ async function ensureBlurHomeAndUnpack() {
   if (usingHome) {
     log(`[resources] Using existing home tree: ${BLUR_HOME}`);
   } else if (app.isPackaged && bundledRoot) {
+    // keep packaged resources in sync by version — but DO NOT fabricate config
     const srcCfg = join(bundledRoot, "config.yaml");
     const dstCfg = join(BLUR_HOME, "config.yaml");
 
@@ -153,8 +158,7 @@ async function ensureBlurHomeAndUnpack() {
       needsCopy = !existsSync(dstCfg) || (!!vSrc && vSrc !== vDst);
       log(`[resources] bundled→appData version check: src=${vSrc || "?"} dst=${vDst || "?"} needsCopy=${needsCopy}`);
     } catch (e) {
-      needsCopy = !existsSync(dstCfg);
-      log("[resources] version compare failed; defaulting to copy:", String(e?.message || e));
+      log("[resources] version compare failed:", String(e?.message || e));
     }
 
     if (needsCopy) {
@@ -201,91 +205,32 @@ async function ensureBlurHomeAndUnpack() {
 }
 
 /* ============================================================================
-   CONFIG BOOTSTRAP
+   CONFIG DISCOVERY — **no minimal/auto bootstrap**
 ============================================================================ */
-function minimalConfigYAML() {
-  const home = process.env.BLUR_HOME || homeBlurPath();
-  return [
-    `# Blur minimal bootstrap config`,
-    `meta:`,
-    `  homes:`,
-    `    blur_home: ${home}`,
-    `    models: ${home}/models`,
-    `    pipes: ${home}/run/pipes`,
-    `    data: ${home}/core`,
-    ``,
-    `chat:`,
-    `  vessel_key: qwen3_4b_unified`,
-    ``,
-    `engines:`,
-    `  llama_cpp:`,
-    `    python_n_ctx: 8192`,
-    `    n_gpu_layers: 3`,
-    ``,
-    `models:`,
-    `  qwen3_4b_unified:`,
-    `    engine: llama_cpp`,
-    `    path: ${home}/models/Qwen3-4B-Instruct-2507-UD-Q8_K_XL.gguf`,
-    `  snowflake_arctic_embed:`,
-    `    engine: llama_cpp`,
-    `    path: ${home}/models/snowflake-arctic-embed-m-Q4_K_M.gguf`,
-    `  bge_reranker_tiny:`,
-    `    engine: llama_cpp`,
-    `    path: ${home}/models/bge-reranker-v2-m3-Q8_0.gguf`,
-    ``,
-    `memory:`,
-    `  vector_store:`,
-    `    engine: faiss`,
-    `    path: ${home}/core/ouinet/blurchive/ecosystem/blur_knowledge.index`,
-    `    chunks_path: ${home}/core/ouinet/blurchive/ecosystem/knowledge_chunks.jsonl`,
-    `    embed_model: snowflake_arctic_embed`,
-    `    ttl_days_persistent: 120`,
-    `    auto_compact_on_start: true`,
-    ``,
-  ].join("\n");
-}
-function bootstrapConfigIfMissing() {
+function requireConfigOrFail() {
   const envPath = process.env.BLUR_CONFIG_PATH;
-  if (envPath && existsSync(envPath)) { log(`[config] Using BLUR_CONFIG_PATH=${envPath}`); return envPath; }
-
   const home = process.env.BLUR_HOME || homeBlurPath();
   const homeCfg = join(home, "config.yaml");
-  if (existsSync(homeCfg)) {
-    process.env.BLUR_CONFIG_PATH = homeCfg;
-    log(`[config] Using home config @ ${homeCfg}`);
-    return homeCfg;
-  }
-
   const bundled = getBundledBlurRoot();
   const bundledCfg = bundled && join(bundled, "config.yaml");
-  if (app.isPackaged && bundledCfg && existsSync(bundledCfg)) {
-    process.env.BLUR_CONFIG_PATH = bundledCfg;
-    log(`[config] Using bundled config @ ${bundledCfg}`);
-    return bundledCfg;
-  }
 
-  try {
-    mkdirSync(path.dirname(homeCfg), { recursive: true });
-    writeFileSync(homeCfg, minimalConfigYAML(), { flag: "wx" });
-    process.env.BLUR_CONFIG_PATH = homeCfg;
-    log(`[config] Bootstrapped home config @ ${homeCfg}`);
-    return homeCfg;
-  } catch {
-    const userCfg = join(app.getPath("userData"), "config.yaml");
-    try {
-      mkdirSync(path.dirname(userCfg), { recursive: true });
-      writeFileSync(userCfg, minimalConfigYAML(), { flag: "w" });
-      process.env.BLUR_CONFIG_PATH = userCfg;
-      log(`[config] Bootstrapped userData config @ ${userCfg}`);
-      return userCfg;
-    } catch {
-      const fallback = join(app.getPath("userData"), `config.${Date.now()}.yaml`);
-      writeFileSync(fallback, minimalConfigYAML());
-      process.env.BLUR_CONFIG_PATH = fallback;
-      log(`[config] Bootstrapped fallback config @ ${fallback}`);
-      return fallback;
-    }
+  const candidates = [
+    envPath && existsSync(envPath) ? envPath : null,
+    existsSync(homeCfg) ? homeCfg : null,
+    (app.isPackaged && bundledCfg && existsSync(bundledCfg)) ? bundledCfg : null,
+  ].filter(Boolean);
+
+  const cfg = candidates[0] || null;
+
+  if (!cfg) {
+    const msg = "Missing OG config.yaml. Set BLUR_CONFIG_PATH or place config.yaml in BLUR_HOME.";
+    log(`[config] FATAL: ${msg}`);
+    model_status = { status: "error", message: msg };
+  } else {
+    process.env.BLUR_CONFIG_PATH = cfg;
+    log(`[config] Using config @ ${cfg}`);
   }
+  return cfg;
 }
 
 /* ============================================================================
@@ -411,10 +356,7 @@ ipcMain.handle("threads:load", () => {
   log(`[threads] load -> ${data.length} threads`);
   return data;
 });
-
-ipcMain.handle("threads:save", (_e, payload) => {
-  return writeThreadsFileAtomic(payload);
-});
+ipcMain.handle("threads:save", (_e, payload) => writeThreadsFileAtomic(payload));
 
 let finalThreadsPayload = null;
 ipcMain.handle("threads:send-final-state-for-quit", (_e, payload) => {
@@ -499,6 +441,8 @@ function buildUvicornArgs(backendDir, useFastLoop = true) {
 }
 function startAIServer(useFastLoop = true) {
   if (aiProc) { log("[main] AI Core start ignored: already running."); return; }
+  const cfgOK = requireConfigOrFail();
+  if (!cfgOK) { broadcastStatus(); return; } // hard stop: no OG config, no core
   const backendDir = findBackendDir();
   const pythonCommand = resolvePython();
   const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
@@ -590,6 +534,11 @@ function ping(urlStr) { return new Promise((resolve, reject) => {
     req.on("timeout", () => req.destroy(new Error("timeout")));
   } catch (e) { reject(e); }
 });}
+
+async function isCoreHealthy() {
+  try { return await ping(CORE_HEALTH); } catch { return false; }
+}
+
 function escapeForHtml(s = "") { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/`/g,"\\`");}
 function splashHTML(msg = "Initializing…") {
   const safe = escapeForHtml(msg);
@@ -609,6 +558,7 @@ async function loadSplash(win, msg) {
   try { await win.loadURL(dataUrl); return true; } catch {} return false;
 }
 function ensureOverlay(win) {
+  if (!SHOW_OVERLAY) return;
   const js = `(function(){try{
     let o=document.getElementById('__blur_overlay');
     if(!o){o=document.createElement('div');o.id='__blur_overlay';
@@ -619,6 +569,7 @@ function ensureOverlay(win) {
   win.webContents.executeJavaScript(js).catch(()=>{});
 }
 function setOverlayText(win, txt) {
+  if (!SHOW_OVERLAY) return;
   const safe = escapeForHtml(String(txt || ""));
   win.webContents.executeJavaScript(`window.__blurSetOverlay && window.__blurSetOverlay("${safe}")`).catch(()=>{});
 }
@@ -668,8 +619,11 @@ async function createWindow() {
       if (typeof message === "string" && message.includes("[vite] connected")) { devReady = true; stopTimer(); }
     });
     const tryLoad = async () => {
-      try { await mainWindow.loadURL(DEV_URL); ensureOverlay(mainWindow); setOverlayText(mainWindow, "dev loaded"); }
-      catch (e) { log("[dev] loadURL error:", e?.message || e); }
+      try {
+        await mainWindow.loadURL(DEV_URL);
+        ensureOverlay(mainWindow);
+        // NOTE: no "dev loaded" banner anymore
+      } catch (e) { log("[dev] loadURL error:", e?.message || e); }
     };
     await tryLoad();
     timer = setInterval(async () => {
@@ -677,7 +631,7 @@ async function createWindow() {
       if (devReady) return stopTimer();
       attempts++;
       try { const ok = await ping(DEV_URL); if (ok && !devReady) await tryLoad(); } catch {}
-      if (attempts % 5 === 0) setOverlayText(mainWindow, `waiting dev… (${attempts})`);
+      if (SHOW_OVERLAY && attempts % 5 === 0) setOverlayText(mainWindow, `waiting dev… (${attempts})`);
     }, 1500);
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
@@ -692,7 +646,7 @@ async function createWindow() {
     const reg = (accel, fn) => { try { globalShortcut.register(accel, fn); } catch {} };
     reg(process.platform === "darwin" ? "CommandOrControl+Shift+R" : "Ctrl+Shift+R", () => {
       if (!mainWindow || mainWindow.isDestroyed()) return;
-      setOverlayText(mainWindow, "manual reload…");
+      if (SHOW_OVERLAY) setOverlayText(mainWindow, "manual reload…");
       if (!app.isPackaged) mainWindow.loadURL(DEV_URL).catch(()=>{});
       else mainWindow.loadFile(join(__dirname, "../dist/index.html")).catch(()=>{});
     });
@@ -714,6 +668,12 @@ ipcMain.handle("core:getInfo", () => ({
   status: model_status,
 }));
 
+// Health probe via main (avoids renderer CORS/console spam)
+ipcMain.handle("core:healthz", async () => {
+  const ok = await isCoreHealthy();
+  return { ok, status: model_status };
+});
+
 /* ============================================================================
    POWER/SLEEP HOOKS — flush before suspend; don’t clobber on resume
 ============================================================================ */
@@ -721,26 +681,14 @@ const flushRendererNow = () => {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) {
       log("[power] requesting flush from renderer (suspend)");
-      mainWindow.webContents.send("main-process-quitting"); // reuse same channel to get final state
+      mainWindow.webContents.send("main-process-quitting");
     }
   } catch {}
 };
-
-powerMonitor.on("suspend", () => {
-  log("[power] suspend detected");
-  flushRendererNow();
-});
-powerMonitor.on("lock-screen", () => {
-  log("[power] lock-screen detected");
-  flushRendererNow();
-});
-powerMonitor.on("resume", () => {
-  log("[power] resume detected");
-  // no-op: renderer will rebuild UI; we rely on defensive writer to avoid [] clobber
-});
-powerMonitor.on("unlock-screen", () => {
-  log("[power] unlock-screen detected");
-});
+powerMonitor.on("suspend", () => { log("[power] suspend detected"); flushRendererNow(); });
+powerMonitor.on("lock-screen", () => { log("[power] lock-screen detected"); flushRendererNow(); });
+powerMonitor.on("resume", () => { log("[power] resume detected"); });
+powerMonitor.on("unlock-screen", () => { log("[power] unlock-screen detected"); });
 
 /* ============================================================================
    SINGLE INSTANCE & LIFECYCLE
@@ -759,27 +707,33 @@ if (!gotLock) {
     initPrefsIPC();
 
     await ensureBlurHomeAndUnpack();
-    bootstrapConfigIfMissing();
+    const cfg = requireConfigOrFail();
     await createWindow();
-    startAIServer(true);
-    model_status = { status: "starting", message: "Initializing AI Core… (first run may copy models)" };
-    broadcastStatus();
 
-    (async () => {
-      const started = Date.now();
-      let ok = false;
-      while (Date.now() - started < 60000) {
-        try {
-          await new Promise(r => setTimeout(r, 1500));
-          if (await ping(CORE_HEALTH)) { ok = true; break; }
-        } catch {}
-      }
-      if (ok) { aiReady = true; model_status = { status: "ready", message: "AI Core ready" }; }
-      else if (model_status.status === "loading" || model_status.status === "starting") {
-        model_status = { status: "degraded", message: "AI Core startup timeout. Using degraded mode." };
-      }
+    if (cfg) {
+      startAIServer(true);
+      model_status = { status: "starting", message: "Initializing AI Core… (first run may copy models)" };
       broadcastStatus();
-    })();
+
+      (async () => {
+        const started = Date.now();
+        let ok = false;
+        while (Date.now() - started < 60000) {
+          try {
+            await new Promise(r => setTimeout(r, 1500));
+            if (await isCoreHealthy()) { ok = true; break; }
+          } catch {}
+        }
+        if (ok) { aiReady = true; model_status = { status: "ready", message: "AI Core ready" }; }
+        else if (model_status.status === "loading" || model_status.status === "starting") {
+          model_status = { status: "degraded", message: "AI Core startup timeout. Using degraded mode." };
+        }
+        broadcastStatus();
+      })();
+    } else {
+      // stay on splash with error text
+      broadcastStatus();
+    }
   });
 }
 
@@ -794,47 +748,34 @@ const cleanQuit = () => {
     log("[quit] Requesting final state from renderer…");
     mainWindow.webContents.send("main-process-quitting");
 
-    // give the renderer a breath; then save only if non-empty
     setTimeout(() => {
-      const okArray = isNonEmptyThreads(finalThreadsPayload);
+      const okArray = Array.isArray(finalThreadsPayload) && finalThreadsPayload.some(t => t?.messages?.length);
       if (okArray) {
         log("[quit] Saving final threads state…");
         writeThreadsFileAtomic(finalThreadsPayload);
       } else {
-        // preserve existing file; never clobber with []
         try {
           const existing = readThreadsFile();
-          if (isNonEmptyThreads(existing)) log("[quit] No final payload; preserving existing threads file.");
+          if (existing.some(t => t?.messages?.length)) log("[quit] No final payload; preserving existing threads file.");
           else log("[quit] No final payload and no existing threads; skipping write.");
         } catch {}
       }
       stopAIServer();
       app.quit();
-    }, 400); // slightly longer grace on sleepy laptops
+    }, 400);
     return;
   }
 
-  // no window → just stop core and quit
   stopAIServer();
   app.quit();
 };
 
 app.on("before-quit", (e) => {
   log("[quit] 'before-quit' triggered.");
-  // only intercept the first time; afterwards allow default quit
-  if (!isQuitting) {
-    e.preventDefault();
-    cleanQuit();
-  }
+  if (!isQuitting) { e.preventDefault(); cleanQuit(); }
 });
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") cleanQuit();
-});
-
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+app.on("window-all-closed", () => { if (process.platform !== "darwin") cleanQuit(); });
+app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
 process.on("uncaughtException", (err) => log("[uncaughtException]", err?.stack || String(err)));
 process.on("unhandledRejection", (reason) => { const r = reason && (reason.stack || String(reason)); log("[unhandledRejection]", r); });

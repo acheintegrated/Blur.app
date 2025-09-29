@@ -691,51 +691,56 @@ class MemoryPayload(BaseModel):
 
 # ---------- STREAM GEN ----------
 async def generate_response_stream(session: Dict, request: RequestModel):
+    """Stream clean text chunks (no SSE framing) while preserving final post-processing for history."""
     user_text = (request.prompt or "").strip()
     req_mode = (request.mode or "dream").strip().lower()
-    
-    # Ensure mode exists in config, otherwise default to "dream"
-    available_modes = get_cfg("range.modes", {})
+
+    # mode gate
+    available_modes = get_cfg("range.modes", {}) or {}
     mode = req_mode if req_mode in available_modes else "dream"
 
+    # language hysteresis
     lang = language_hysteresis_update_lang(session, user_text)
 
+    # chat vessel
     chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
     chat_llm = llm_vessels.get(chat_key)
     if not chat_llm:
         yield "Model not loaded."
         return
 
-    # --- PROMPT ASSEMBLY REFORGED ---
-    # This now builds the prompt from your config.yaml instead of using hardcoded values.
-    system_prompt_parts = []
-    
-    # 1. Get the main system prompt
+    # ----- prompt assembly (config-driven) -----
+    system_prompt_parts: List[str] = []
     system_core = get_cfg("prompts.system_core", "")
     if system_core:
         system_prompt_parts.append(system_core)
-
-    # 2. Get the mode-specific style contract
     style_contract = get_cfg(f"prompts.style_contract_{mode}", "")
     if style_contract:
         system_prompt_parts.append(style_contract)
-    
-    # 3. Get the mode-specific injection/lock
     mode_inject = get_cfg(f"prompts.mode_tone_inject.{mode}", "")
     if mode_inject:
         system_prompt_parts.append(mode_inject)
-
     final_system_prompt = "\n\n".join(system_prompt_parts)
-    # --- END REFORGE ---
 
-    context = retrieve_context_blend(user_text, session.get("id"), None, session.get("username") or request.username, top_k=5)
-    audience = (session.get("audience") or get_cfg("release.audience_default","internal")).lower()
+    # retrieval blend
+    context = retrieve_context_blend(
+        user_text,
+        session.get("id"),
+        None,
+        session.get("username") or request.username,
+        top_k=5,
+    )
+    audience = (session.get("audience") or get_cfg("release.audience_default", "internal")).lower()
 
-    history_pairs = session.get("history", [])[-int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)) :]
-    
-    # Use the newly assembled system prompt
+    # history window
+    history_pairs = session.get("history", [])[
+        -int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)) :
+    ]
+
+    # messages
     msgs = build_messages(mode, final_system_prompt, history_pairs, user_text, context, lang)
 
+    # model params (per-mode)
     mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
     params = dict(
         messages=msgs,
@@ -743,36 +748,52 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         top_p=float(mp.get("top_p", 0.9)),
         repeat_penalty=float(mp.get("repeat_penalty", 1.12)),
         max_tokens=int(mp.get("n_predict", 4444)),
-        stop=["</s>","<|im_end|>","[INST]","[/INST]"],
-        stream=True
+        stop=["</s>", "<|im_end|>", "[INST]", "[/INST]"],
+        stream=True,
     )
 
+    # ----- live stream (clean markdown) -----
     response_text = ""
     try:
         for chunk in chat_llm.create_chat_completion(**params):
             delta = (chunk.get("choices") or [{}])[0].get("delta", {})
             piece = delta.get("content")
-            if not piece: continue
-            piece = piece.replace("\r\n","\n")
+            if not piece:
+                continue
+
+            # normalize newlines, but DO NOT touch spaces/punctuation (keeps markdown tight)
+            piece = piece.replace("\r\n", "\n")
+
+            # audience scrub only if release=public; otherwise pass-through
             safe_piece = sanitize_for_audience(piece, audience)
+
+            # accumulate for final post-processing + history
             response_text += safe_piece
+
+            # yield tiny chunk + yield to loop so transport flushes immediately
             yield safe_piece
+            await asyncio.sleep(0)
     except Exception as e:
         logging.error("Generation error: %s", e)
         yield "Internal error."
         return
 
+    # ----- finalize only for what we store (do NOT retro-stream) -----
     final_text = (response_text.strip() or "…")
     if mode == "dream":
         t = final_text
-        for w in DREAM_BANS: t = re.sub(rf"(?i)\b{re.escape(w)}\b","", t)
-        t = re.sub(r"[ \t]{2,}"," ", t); t = re.sub(r"([!?])\1{1,}", r"\1", t)
+        for w in DREAM_BANS:
+            t = re.sub(rf"(?i)\b{re.escape(w)}\b", "", t)
+        t = re.sub(r"[ \t]{2,}", " ", t)
+        t = re.sub(r"([!?])\1{1,}", r"\1", t)
         final_text = t.strip()
     elif mode == "astrofuck":
         final_text = astrofuck_ensure_slang(final_text, lang)
+
     final_text = _strip_emoji_except_glyphs(final_text)
     final_text = enforce_persona_ending(final_text, mode)
 
+    # persist turn
     hist = session.setdefault("history", [])
     hist.append({"user": user_text, "assistant": final_text})
     session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
