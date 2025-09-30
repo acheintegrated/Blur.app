@@ -26,6 +26,24 @@
   pre { @apply my-4; }
 }
 
+
+@layer components {
+  /* yellow glow line that grows from center to edges */
+  .mode-glow-line {
+    @apply absolute bottom-0 left-1/2 h-[2px];
+    width: 0;
+    transform: translateX(-50%);
+    background: linear-gradient(90deg, rgba(255,208,0,0) 0%, rgba(255,208,0,1) 50%, rgba(255,208,0,0) 100%);
+    box-shadow: 0 0 10px rgba(255,208,0,0.8), 0 0 18px rgba(255,208,0,0.5);
+    animation: ache-center-spread 900ms ease-in-out infinite alternate;
+  }
+}
+
+@keyframes ache-center-spread {
+  from { width: 0%; opacity: 0.95; }
+  to   { width: 100%; opacity: 0.95; }
+}
+
 /* Courier New (family-unified) */
 @font-face {
   font-family: 'Courier New';
