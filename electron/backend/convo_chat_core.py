@@ -53,7 +53,10 @@ MANIFEST_PATH = os.path.expanduser(os.getenv("BLUR_CONFIG_PATH", os.path.join(BL
 
 STATE_DIR = os.path.expanduser(os.getenv("BLUR_STATE_DIR", BLUR_HOME))
 Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
-SESSIONS_FILE = os.path.join(STATE_DIR, "sessions.json")
+SESSIONS_DIR = os.path.join(STATE_DIR, "sessions")
+Path(SESSIONS_DIR).mkdir(parents=True, exist_ok=True)
+
+LAST_SESSION_FILE = os.path.join(STATE_DIR, "last_session.txt")
 USER_MEMORY_FILE = os.path.join(STATE_DIR, "user_memory.json")
 
 DEFAULT_HISTORY_TURNS_FOR_PROMPT = 12
@@ -654,6 +657,7 @@ class RequestModel(BaseModel):
     new_session: bool = False
     force_lang: Optional[str] = None
     username: Optional[str] = None
+    thread_id: Optional[str] = None   # thread scoping
 
 class MemoryUpsert(BaseModel):
     user: str
@@ -704,10 +708,11 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     context = retrieve_context_blend(
         user_text,
         session.get("id"),
-        None,
+        request.thread_id,                   # scoped by thread
         session.get("username") or request.username,
         top_k=8,
     )
+
     audience = (session.get("audience") or get_cfg("release.audience_default", "internal")).lower()
 
     # caps to keep TTFT sharp
@@ -822,7 +827,8 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
     session["turn"] = int(session.get("turn", 0)) + 1
     try:
-        save_sessions()
+        save_session(session.get("id"))  # persist only this session
+        save_sessions()                   # noop global
     except Exception:
         logging.error("autosave sessions failed", exc_info=True)
 
@@ -931,21 +937,26 @@ async def handle_generate_request(req: RequestModel, http: FastAPIRequest):
     if req.new_session:
         sid = str(uuid.uuid4())
 
+    # Lazy: load file or create a fresh one
     if sid not in sessions:
-        sessions[sid] = {
-            "id": sid,
-            "mode": "astrofuck",  # 🔥 cold-start astrofuck
-            "history": [],
-            "turn": 0,
-            "username": req.username,
-            "wants": {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True},
-            "audience": "internal",
-            "kv_ready": False,
-            "active_lang": get_cfg("language.default_if_unknown", "English"),
-        }
+        if os.path.exists(_session_path(sid)):
+            load_session(sid)
+        else:
+            sessions[sid] = {
+                "id": sid,
+                "mode": "astrofuck",
+                "history": [],
+                "turn": 0,
+                "username": req.username,
+                "wants": {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True},
+                "audience": "internal",
+                "kv_ready": False,
+                "active_lang": get_cfg("language.default_if_unknown", "English"),
+            }
 
-    # If request omitted mode, keep astrofuck
-    sessions[sid]["mode"] = (req.mode or "astrofuck").lower()
+    # Keep current mode unless explicitly changing
+    if req.mode:
+        sessions[sid]["mode"] = (req.mode or "astrofuck").lower()
 
     last_seen_session_id = sid
     resp = StreamingResponse(generate_response_stream(sessions[sid], req), media_type="text/plain")
@@ -1017,44 +1028,69 @@ def _ensure_state_dir():
     except Exception as e:
         logging.error(f"Failed to create state dir {STATE_DIR}: {e}")
 
-def load_sessions():
-    global sessions
-    _ensure_state_dir()
-    if os.path.exists(SESSIONS_FILE):
+def _session_path(sid: str) -> str:
+    return os.path.join(SESSIONS_DIR, f"{sid}.json")
+
+def load_session(sid: str) -> Dict[str, Any]:
+    """Lazy-load a single session file; clamp history in-memory."""
+    path = _session_path(sid)
+    data: Dict[str, Any] = {}
+    keep_n = int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))
+    if os.path.exists(path):
         try:
-            with open(SESSIONS_FILE, "r") as f:
-                loaded = json.load(f)
-            sessions = {}
-            keep_n = int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))
-            for sid, data in (loaded or {}).items():
-                hist = data.get("history", [])
-                if isinstance(hist, list):
-                    data["history"] = hist[-keep_n:]
-                else:
-                    data["history"] = []
-                data.setdefault("username", None)
-                data.setdefault("wants", {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True})
-                data.setdefault("audience", "internal")
-                data.setdefault("turn", len(data["history"]))
-                data.setdefault("kv_ready", False)
-                data.setdefault("active_lang", get_cfg("language.default_if_unknown","English"))
-                sessions[sid] = data
-            logging.info("Loaded %d sessions from %s", len(sessions), SESSIONS_FILE)
+            with open(path, "r") as f:
+                data = json.load(f) or {}
         except Exception as e:
-            logging.error("Failed to load sessions: %s", e)
-            sessions = {}
-    else:
-        sessions = {}
+            logging.error("Failed to read session %s: %s", sid, e)
+            data = {}
+    data.setdefault("id", sid)
+    hist = data.get("history", [])
+    data["history"] = hist[-keep_n:] if isinstance(hist, list) else []
+    data.setdefault("mode", "astrofuck")
+    data.setdefault("turn", len(data["history"]))
+    data.setdefault("username", data.get("username"))
+    data.setdefault("wants", {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True})
+    data.setdefault("audience", "internal")
+    data.setdefault("kv_ready", False)
+    data.setdefault("active_lang", get_cfg("language.default_if_unknown","English"))
+    sessions[sid] = data
+    return data
+
+def save_session(sid: str):
+    """Persist only this session; no global write."""
+    if sid not in sessions: return
+    path = _session_path(sid)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(sessions[sid], f, indent=2)
+        os.replace(tmp, path)
+        # remember last active
+        try:
+            with open(LAST_SESSION_FILE, "w") as g:
+                g.write(sid)
+        except Exception:
+            pass
+    except Exception as e:
+        logging.error("Failed to save session %s: %s", sid, e)
+
+def load_sessions():
+    # noop: try to restore only last seen for warmth
+    global last_seen_session_id
+    try:
+        if os.path.exists(LAST_SESSION_FILE):
+            with open(LAST_SESSION_FILE, "r") as f:
+                sid = (f.read() or "").strip()
+                if sid:
+                    load_session(sid)
+                    last_seen_session_id = sid
+    except Exception:
+        pass
 
 def save_sessions():
-    try:
-        _ensure_state_dir()
-        tmp = SESSIONS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(sessions, f, indent=2)
-        os.replace(tmp, SESSIONS_FILE)
-    except Exception as e:
-        logging.error("Failed to save sessions: %s", e)
+    # noop: we persist per-session; nothing to do globally
+    pass
+
 
 # ---------- STARTUP / SHUTDOWN ----------
 @app.on_event("startup")

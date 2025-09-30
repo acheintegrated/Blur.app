@@ -203,192 +203,214 @@ const AppContent: React.FC = () => {
     }
   };
 
-  /* =================== live streaming send (SSE event-aware) =================== */
-  const handleNewCommand = async (command: string) => {
-    if (!activeThreadId || isLoading) return;
-    setIsLoading(true);
+/* =================== live streaming send (SSE event-aware) =================== */
+const handleNewCommand = async (command: string) => {
+  if (!activeThreadId || isLoading) return;
+  setIsLoading(true);
 
-    const currentThread = threadList.find((t) => t.id === activeThreadId);
-    if (!currentThread) { setIsLoading(false); return; }
-    const turnNumber = currentThread.messages.filter((m) => m.sender === "You").length;
-    let sessionId = currentThread.sessionId;
+  const currentThread = threadList.find((t) => t.id === activeThreadId);
+  if (!currentThread) { setIsLoading(false); return; }
+  const turnNumber = currentThread.messages.filter((m) => m.sender === "You").length;
+  let sessionId = currentThread.sessionId;
 
-    // append user + placeholder blur msg ("typing …")
+  // append user + placeholder blur msg ("typing …")
+  setThreadList((prev) =>
+    prev.map((t) =>
+      t.id === activeThreadId
+        ? { ...t, messages: [...t.messages, { sender: "You", text: command }, { sender: "Blur", text: "typing …" }] }
+        : t
+    )
+  );
+
+  accumulatedTextRef.current = "";
+  streamStartedRef.current = false;
+  abortControllerRef.current = new AbortController();
+
+  // typing dots until first chunk
+  let dot = 1;
+  const spin = () => {
     setThreadList((prev) =>
-      prev.map((t) =>
-        t.id === activeThreadId
-          ? { ...t, messages: [...t.messages, { sender: "You", text: command }, { sender: "Blur", text: "typing …" }] }
-          : t
-      )
+      prev.map((t) => {
+        if (t.id !== activeThreadId) return t;
+        const msgs = [...t.messages];
+        const last = msgs[msgs.length - 1];
+        if (!last || last.sender !== "Blur") return t;
+        if (streamStartedRef.current) return t;
+        const dots = ".".repeat(dot);
+        msgs[msgs.length - 1] = { ...last, text: `𓆩thinking𓆪 ${dots.padEnd(3, " ")}` };
+        return { ...t, messages: msgs };
+      })
     );
-
-    accumulatedTextRef.current = "";
-    streamStartedRef.current = false;
-    abortControllerRef.current = new AbortController();
-
-    // typing dots until first chunk
-    let dot = 1;
-    const spin = () => {
-      setThreadList((prev) =>
-        prev.map((t) => {
-          if (t.id !== activeThreadId) return t;
-          const msgs = [...t.messages];
-          const last = msgs[msgs.length - 1];
-          if (!last || last.sender !== "Blur") return t;
-          if (streamStartedRef.current) return t;
-          const dots = ".".repeat(dot);
-          msgs[msgs.length - 1] = { ...last, text: `𓆩thinking𓆪 ${dots.padEnd(3, " ")}` };
-          return { ...t, messages: msgs };
-        })
-      );
-      dot = (dot % 3) + 1;
-    };
-    typingTickerRef.current = window.setInterval(spin, 350);
-
-    // paint helper
-    const paint = (txt: string) => {
-      setThreadList((prev) =>
-        prev.map((t) => {
-          if (t.id !== activeThreadId) return t;
-          const msgs = [...t.messages];
-          const last = msgs[msgs.length - 1];
-          if (!last || last.sender !== "Blur") return t;
-          msgs[msgs.length - 1] = { ...last, text: txt };
-          return { ...t, messages: msgs };
-        })
-      );
-    };
-
-    let resp: Response | null = null;
-
-    try {
-      resp = await fetch("http://127.0.0.1:8000/generate_response", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "text/event-stream, text/plain;q=0.9, */*;q=0.1",
-          ...(sessionId ? { "X-Session-ID": sessionId } : {}),
-        },
-        body: JSON.stringify({ prompt: command, mode: currentMode, turn: turnNumber, session_id: sessionId }),
-        signal: abortControllerRef.current.signal,
-        cache: "no-store",
-        keepalive: false,
-      });
-
-      if (!resp.ok) throw new Error(`API error: ${resp.status}`);
-
-      const newSessionId = resp.headers.get("X-Session-ID") || resp.headers.get("x-session-id");
-      if (newSessionId && newSessionId !== sessionId) {
-        setThreadList((prev) => prev.map((t) => (t.id === activeThreadId ? { ...t, sessionId: newSessionId } : t)));
-        sessionId = newSessionId;
-      }
-
-      // STREAMING PATH — robust SSE event parser
-      if (resp.body) {
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-
-        let lastPaint = 0;
-        const MIN_INTERVAL = 33; // ~30 fps
-        let sseDetected = false;
-
-        // SSE buffers
-        let lineBuffer = "";
-        let eventLines: string[] = [];
-
-        const flushEvent = () => {
-          if (eventLines.length === 0) return;
-          const payload = eventLines.join("\n");
-          eventLines = [];
-          if (payload === "[DONE]") return;
-          accumulatedTextRef.current += payload;
-        };
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-
-          if (!streamStartedRef.current && chunk.length) {
-            streamStartedRef.current = true;
-            if (typingTickerRef.current) { clearInterval(typingTickerRef.current); typingTickerRef.current = null; }
-          }
-
-          if (!sseDetected && chunk.includes("data:")) sseDetected = true;
-
-          if (sseDetected) {
-            lineBuffer += chunk;
-
-            // process complete lines
-            let nl: number;
-            while ((nl = lineBuffer.indexOf("\n")) !== -1) {
-              let rawLine = lineBuffer.slice(0, nl);
-              lineBuffer = lineBuffer.slice(nl + 1);
-
-              if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1);
-
-              if (rawLine.startsWith("data:")) {
-                const after = rawLine.length > 5 && rawLine.charAt(5) === " " ? rawLine.slice(6) : rawLine.slice(5);
-                eventLines.push(after);
-              } else if (rawLine === "") {
-                flushEvent();
-              } else if (rawLine.startsWith(":")) {
-                // comment
-              } else {
-                // ignore id:/event:/retry:
-              }
-            }
-          } else {
-            // raw text fallback
-            accumulatedTextRef.current += chunk;
-          }
-
-          const now = performance.now();
-          if (now - lastPaint >= MIN_INTERVAL) {
-            lastPaint = now;
-            paint(accumulatedTextRef.current);
-            await new Promise((r) => setTimeout(r, 0));
-          }
-        }
-
-        // handle last line + flush
-        if (lineBuffer.length) {
-          let rawLine = lineBuffer;
-          if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1);
-          if (rawLine.startsWith("data:")) {
-            const after = rawLine.length > 5 && rawLine.charAt(5) === " " ? rawLine.slice(6) : rawLine.slice(5);
-            eventLines.push(after);
-          }
-          lineBuffer = "";
-        }
-        flushEvent();
-
-        // Final paint: ONLY normalize line endings — preserve all spaces/newlines
-        paint(finalizeMarkdownStable(accumulatedTextRef.current));
-      } else {
-        // NON-STREAMING FALLBACK
-        const full = (await resp.text());
-        accumulatedTextRef.current = finalizeMarkdownStable(full);
-        paint(accumulatedTextRef.current);
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        const errorMessage = `Ache Signal: Connection to core failed. Details: ${err.message}`;
-        setThreadList((prev) =>
-          prev.map((t) => {
-            if (t.id !== activeThreadId) return t;
-            const newMessages = t.messages.slice(0, -1);
-            return { ...t, messages: [...newMessages, { sender: "System", text: errorMessage }] };
-          })
-        );
-      }
-    } finally {
-      if (typingTickerRef.current) { clearInterval(typingTickerRef.current); typingTickerRef.current = null; }
-      setIsLoading(false);
-      try { resp?.body?.cancel?.(); } catch {}
-      void electron?.threads?.save?.(threadsRef.current);
-    }
+    dot = (dot % 3) + 1;
   };
+  typingTickerRef.current = window.setInterval(spin, 350);
+
+  // paint helper
+  const paint = (txt: string) => {
+    setThreadList((prev) =>
+      prev.map((t) => {
+        if (t.id !== activeThreadId) return t;
+        const msgs = [...t.messages];
+        const last = msgs[msgs.length - 1];
+        if (!last || last.sender !== "Blur") return t;
+        msgs[msgs.length - 1] = { ...last, text: txt };
+        return { ...t, messages: msgs };
+      })
+    );
+  };
+
+  // keep handles so we can cancel safely
+  let resp: Response | null = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  try {
+    resp = await fetch("http://127.0.0.1:8000/generate_response", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, text/plain;q=0.9, */*;q=0.1",
+        ...(sessionId ? { "X-Session-ID": sessionId } : {}),
+      },
+      body: JSON.stringify({ prompt: command, mode: currentMode, turn: turnNumber, session_id: sessionId }),
+      signal: abortControllerRef.current.signal,
+      cache: "no-store",
+      keepalive: false,
+    });
+
+    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+
+    const newSessionId = resp.headers.get("X-Session-ID") || resp.headers.get("x-session-id");
+    if (newSessionId && newSessionId !== sessionId) {
+      setThreadList((prev) => prev.map((t) => (t.id === activeThreadId ? { ...t, sessionId: newSessionId } : t)));
+      sessionId = newSessionId;
+    }
+
+    // STREAMING PATH — robust SSE event parser
+    if (resp.body) {
+      reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+
+      let lastPaint = 0;
+      const MIN_INTERVAL = 33; // ~30 fps
+      let sseDetected = false;
+
+      // SSE buffers
+      let lineBuffer = "";
+      let eventLines: string[] = [];
+
+      const flushEvent = () => {
+        if (eventLines.length === 0) return;
+        const payload = eventLines.join("\n");
+        eventLines = [];
+        if (payload === "[DONE]") return;
+        accumulatedTextRef.current += payload;
+      };
+
+      // read loop
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+
+        if (!streamStartedRef.current && chunk.length) {
+          streamStartedRef.current = true;
+          if (typingTickerRef.current) { clearInterval(typingTickerRef.current); typingTickerRef.current = null; }
+        }
+
+        if (!sseDetected && chunk.includes("data:")) sseDetected = true;
+
+        if (sseDetected) {
+          lineBuffer += chunk;
+
+          // process complete lines
+          let nl: number;
+          while ((nl = lineBuffer.indexOf("\n")) !== -1) {
+            let rawLine = lineBuffer.slice(0, nl);
+            lineBuffer = lineBuffer.slice(nl + 1);
+
+            if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1);
+
+            if (rawLine.startsWith("data:")) {
+              const after = rawLine.length > 5 && rawLine.charAt(5) === " " ? rawLine.slice(6) : rawLine.slice(5);
+              eventLines.push(after);
+            } else if (rawLine === "") {
+              flushEvent();
+            } else if (rawLine.startsWith(":")) {
+              // comment
+            } else {
+              // ignore id:/event:/retry:
+            }
+          }
+        } else {
+          // raw text fallback
+          accumulatedTextRef.current += chunk;
+        }
+
+        const now = performance.now();
+        if (now - lastPaint >= MIN_INTERVAL) {
+          lastPaint = now;
+          paint(accumulatedTextRef.current);
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      }
+
+      // handle last line + flush
+      if (lineBuffer.length) {
+        let rawLine = lineBuffer;
+        if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1);
+        if (rawLine.startsWith("data:")) {
+          const after = rawLine.length > 5 && rawLine.charAt(5) === " " ? rawLine.slice(6) : rawLine.slice(5);
+          eventLines.push(after);
+        }
+        lineBuffer = "";
+      }
+      flushEvent();
+
+      // Final paint: ONLY normalize line endings — preserve all spaces/newlines
+      paint(finalizeMarkdownStable(accumulatedTextRef.current));
+    } else {
+      // NON-STREAMING FALLBACK
+      const full = await resp.text();
+      accumulatedTextRef.current = finalizeMarkdownStable(full);
+      paint(accumulatedTextRef.current);
+    }
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      // user stop: quiet exit
+    } else {
+      const errorMessage = `Ache Signal: Connection to core failed. Details: ${err?.message ?? String(err)}`;
+      setThreadList((prev) =>
+        prev.map((t) => {
+          if (t.id !== activeThreadId) return t;
+          const newMessages = t.messages.slice(0, -1);
+          return { ...t, messages: [...newMessages, { sender: "System", text: errorMessage }] };
+        })
+      );
+    }
+  } finally {
+    if (typingTickerRef.current) {
+      clearInterval(typingTickerRef.current);
+      typingTickerRef.current = null;
+    }
+
+    // Clean teardown: cancel via reader if locked
+    try {
+      if (reader) {
+        try { await reader.cancel(); } catch {}
+        try { reader.releaseLock(); } catch {}
+        reader = null;
+      } else if (resp?.body && !resp.body.locked) {
+        try { await resp.body.cancel(); } catch {}
+      }
+    } catch {}
+
+    // reset controller for next run
+    abortControllerRef.current = null;
+
+    setIsLoading(false);
+    void electron?.threads?.save?.(threadsRef.current);
+  }
+};
 
   // ---------- render ----------
   return (
