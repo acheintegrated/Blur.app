@@ -1,4 +1,4 @@
-// /electron/preload.mjs — v9.8 (idempotent • IPC-first • sleep-safe flush)
+// /electron/preload.mjs — v9.9 (idempotent • IPC-first • fires DOM readiness events)
 import { contextBridge, ipcRenderer } from "electron";
 
 // ---- idempotency guard (prevents double wiring on HMR/resume) ----
@@ -16,6 +16,9 @@ if (!globalThis.__blur_preload_loaded) {
   const deepClone = (v) => {
     try { return (v && typeof v === "object") ? structuredClone(v) : v; }
     catch { try { return JSON.parse(JSON.stringify(v)); } catch { return v; } }
+  };
+  const dispatch = (name, detail) => {
+    try { window.dispatchEvent(new CustomEvent(name, { detail })); } catch {}
   };
 
   /* ========================= prefs/env/active ========================= */
@@ -80,6 +83,29 @@ if (!globalThis.__blur_preload_loaded) {
     getInfo: () => safeInvoke("core:getInfo"),
     healthz: () => safeInvoke("core:healthz"), // main handles health checks; no CORS/no console spam
   });
+
+  // --- NEW: Internal wiring to fire DOM events for UI smoothing ---------
+  // We forward ai-status -> DOM so renderer components can react without importing ipcRenderer.
+  // Events:
+  //   blur:core-status            { status, message? }
+  //   blur:mode-switch-start      { status }
+  //   blur:mode-ready             { status }
+  //   blur:mode-switch-error      { status, message? }
+  const aiStatusToDom = (_e, payload) => {
+    const status = payload?.status;
+    if (!status) return;
+    dispatch('blur:core-status', payload);
+    if (status === 'loading_model' || status === 'connecting' || status === 'initializing') {
+      dispatch('blur:mode-switch-start', payload);
+    }
+    if (status === 'ready') {
+      dispatch('blur:mode-ready', payload);
+    }
+    if (status === 'error') {
+      dispatch('blur:mode-switch-error', payload);
+    }
+  };
+  ipcRenderer.on('ai-status-update', aiStatusToDom);
 
   /* ========================= error taps → main ========================= */
   window.addEventListener("error", (e) => {

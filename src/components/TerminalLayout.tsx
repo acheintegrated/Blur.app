@@ -1,5 +1,7 @@
 // /opt/blurface/src/components/TerminalLayout.tsx
-// REFORGED v3.4 — Wire up ContextMenu (right-click), safe delete, rename request event, preserve existing props
+// REFORGED v3.7 — Smooth mode switching (coalesced) + shimmer + spinner-only badge
+// + In-bubble CUT marker (█) on mode change or new thread while streaming
+// + ContextMenu wired; safe delete/rename; preserves existing props
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './SideBar';
@@ -48,7 +50,7 @@ interface TerminalLayoutProps {
   onNewCommand: (command: string) => void;
   onNewConversation: () => void;
   currentMode: 'dream' | 'astrofuck';
-  onModeToggle: () => void;
+  onModeToggle: () => void; // triggers app-level switch (model load, etc.)
   connectionStatus: 'initializing' | 'connecting' | 'loading_model' | 'ready' | 'error';
   onStopGeneration: () => void;
   isLoading: boolean;
@@ -93,20 +95,126 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   // --- NEW: local context-menu state
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
 
+  // --- NEW: mode switching safety + indicator ---
+  const [isSwitchingMode, setIsSwitchingMode] = useState(false);
+  const queuedSwitch = useRef(false);
+  const switchStartAt = useRef<number>(0);
+  const lastIntentId = useRef<number>(0);
+  const MIN_INDICATOR_MS = 420; // keep shimmer visible briefly (smooth)
+  const COOLDOWN_MS = 800; // coalesce frantic clicks
+  const HARD_TIMEOUT_MS = 20_000; // safety cutoff
+
   const activeThread = threadList.find((t) => t.id === activeItem);
   const currentMessages = activeThread?.messages || [];
 
+  // --- CUT MARKER: append a solid block to the last assistant message
+  const markLastAssistantCut = useCallback(() => {
+    if (!activeItem) return;
+    const BLOCK = '█';
+    setThreadList(prev => {
+      const idx = prev.findIndex(t => t.id === activeItem);
+      if (idx === -1) return prev;
+      const t = prev[idx];
+      if (!t.messages.length) return prev;
+      const last = t.messages[t.messages.length - 1];
+      if (last.sender !== 'Blur') return prev; // only decorate assistant bubbles
+      const lastText = (last.text ?? '');
+      // avoid double-marking
+      if (lastText.trimEnd().endsWith(BLOCK)) return prev;
+      const updated = [...t.messages];
+      updated[updated.length - 1] = { ...last, text: lastText + BLOCK };
+      const next = [...prev];
+      next[idx] = { ...t, messages: updated };
+      return next;
+    });
+  }, [activeItem, setThreadList]);
+
   const handleNewCommandLocal = (command: string) => {
-    if (!activeItem || isLoading) return;
+    if (!activeItem || isLoading || isSwitchingMode) return; // block while switching
     onNewCommand(command);
   };
 
   const toggleSidebar = () => setSidebarCollapsed(!sidebarCollapsed);
   const openSettings = () => setShowSettings(true);
   const closeSettings = () => setShowSettings(false);
-  const handleModeChange = () => onModeToggle();
 
-  // --- RESIZER
+  // --- SAFE MODE SWITCH ----------------------------------------------------
+  const endSwitchVisual = useCallback(() => {
+    const elapsed = Date.now() - switchStartAt.current;
+    const remain = Math.max(0, MIN_INDICATOR_MS - elapsed);
+    window.setTimeout(() => setIsSwitchingMode(false), remain);
+  }, []);
+
+  // Finish switch when core reports ready or emits custom event
+  useEffect(() => {
+    if (!isSwitchingMode) return;
+    if (connectionStatus === 'ready') {
+      endSwitchVisual();
+    }
+  }, [connectionStatus, isSwitchingMode, endSwitchVisual]);
+
+  useEffect(() => {
+    if (!isSwitchingMode) return;
+    const onComplete = () => endSwitchVisual();
+    const onError = () => endSwitchVisual();
+    window.addEventListener('blur:mode-ready', onComplete as EventListener);
+    window.addEventListener('blur:mode-switch-complete', onComplete as EventListener);
+    window.addEventListener('blur:mode-switch-error', onError as EventListener);
+    const hard = window.setTimeout(onError, HARD_TIMEOUT_MS);
+    return () => {
+      window.removeEventListener('blur:mode-ready', onComplete as EventListener);
+      window.removeEventListener('blur:mode-switch-complete', onComplete as EventListener);
+      window.removeEventListener('blur:mode-switch-error', onError as EventListener);
+      window.clearTimeout(hard);
+    };
+  }, [isSwitchingMode, endSwitchVisual]);
+
+  const requestModeSwitch = useCallback(() => {
+    const now = Date.now();
+    // coalesce rapid toggles
+    if (isSwitchingMode) {
+      queuedSwitch.current = true; // remember to switch again after current completes
+      return;
+    }
+    // basic cooldown guard
+    const last = switchStartAt.current || 0;
+    if (now - last < COOLDOWN_MS) return;
+
+    // kick off switch
+    lastIntentId.current += 1;
+    const intentId = lastIntentId.current;
+    switchStartAt.current = now;
+    setIsSwitchingMode(true);
+
+    try {
+      // announce to rest of app (optional listeners)
+      window.dispatchEvent(
+        new CustomEvent('blur:mode-switch-start', { detail: { intentId, from: currentMode } })
+      );
+    } catch {}
+
+    // NEW: if streaming, stamp a CUT block and stop generation before switching
+    try {
+      if (isLoading) markLastAssistantCut();
+      onStopGeneration();
+    } catch {}
+
+    // delegate actual switch to parent
+    try { onModeToggle(); } catch (e) { /* parent handles */ }
+  }, [currentMode, isSwitchingMode, onModeToggle, onStopGeneration, isLoading, markLastAssistantCut]);
+
+  // after a completed switch, if user spam-clicked, run one more
+  useEffect(() => {
+    if (!isSwitchingMode && queuedSwitch.current) {
+      queuedSwitch.current = false;
+      // small microdelay to allow parent state to settle
+      const t = window.setTimeout(() => requestModeSwitch(), 50);
+      return () => window.clearTimeout(t);
+    }
+  }, [isSwitchingMode, requestModeSwitch]);
+
+  // -------------------------------------------------------------------------
+  // RESIZER
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isResizing.current) return;
     const minWidth = 220;
@@ -229,8 +337,40 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     closeMenu();
   };
 
+  // --- Minimal inline switch indicator UI ---------------------------------
+  const ModeShimmer = () => (
+    <div className="absolute inset-x-0 top-[57px] h-[2px] overflow-hidden">
+      <div className={`h-full w-full ${
+        isSwitchingMode ? 'animate-[shimmer_1.2s_linear_infinite]' : 'opacity-0'
+      } bg-gradient-to-r from-transparent via-white/70 to-transparent`} />
+      <style>
+        {`@keyframes shimmer { 0%{ transform: translateX(-100%);} 100%{ transform: translateX(100%);} }`}
+      </style>
+    </div>
+  );
+
+  const ModeBadge = () => (
+    isSwitchingMode ? (
+      <span className="ml-3 inline-flex items-center px-2 py-1 rounded-full border border-white/10 bg-white/5 backdrop-blur-sm select-none">
+        <span className="inline-block h-3 w-3 rounded-full border-2 border-white/40 border-t-transparent animate-spin" />
+      </span>
+    ) : null
+  );
+
+  // --- New thread handler: CUT mark + stop, then create ---
+  const handleNewConversationLocal = useCallback(() => {
+    try {
+      if (isLoading) markLastAssistantCut();
+      onStopGeneration();
+    } catch {}
+    onNewConversation();
+  }, [isLoading, onStopGeneration, onNewConversation, markLastAssistantCut]);
+
   return (
     <div className="flex flex-col h-full bg-black relative">
+      {/* top shimmer progress when switching */}
+      <ModeShimmer />
+
       <div className="flex flex-1 overflow-hidden">
         <div
           className={`relative flex-shrink-0 border-r border-zinc-900 ${
@@ -247,7 +387,7 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
               threadList={threadList}
               setThreadList={setThreadList}
               sidebarCollapsed={sidebarCollapsed}
-              onNewConversation={onNewConversation}
+              onNewConversation={handleNewConversationLocal}
               // NOW actually used: right-click opens ContextMenu
               onThreadContextMenu={handleThreadContextMenu}
               renameState={renameState}
@@ -286,10 +426,11 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
 
             <div className="flex items-center">
               <div
-                className={`flex items-center justify-center cursor-pointer mode-button blur-glow-hover ${
-                  currentMode === 'astrofuck' ? 'mode-astrofuck-active' : ''
-                }`}
-                onClick={handleModeChange}
+                className={`flex items-center justify-center cursor-pointer mode-button ${
+                  isSwitchingMode ? 'opacity-50 pointer-events-none' : 'blur-glow-hover'
+                } ${currentMode === 'astrofuck' ? 'mode-astrofuck-active' : ''}`}
+                onClick={requestModeSwitch}
+                title={isSwitchingMode ? 'Switching…' : 'Switch mode'}
               >
                 <span className="text-3xl icon-font">∅</span>
               </div>
@@ -298,12 +439,14 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
               </div>
               <div
                 className={`flex items-center justify-center cursor-pointer mode-button ${
-                  currentMode === 'dream' ? 'mode-dream-active' : 'blur-glow-hover'
+                  isSwitchingMode ? 'opacity-50 pointer-events-none' : (currentMode === 'dream' ? 'mode-dream-active' : 'blur-glow-hover')
                 }`}
-                onClick={handleModeChange}
+                onClick={requestModeSwitch}
+                title={isSwitchingMode ? 'Switching…' : 'Switch mode'}
               >
                 <span className="text-3xl icon-font">∞</span>
               </div>
+              <ModeBadge />
             </div>
 
             <div className="flex items-center">
@@ -322,7 +465,7 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
           <div className="mt-auto flex-shrink-0">
             <CommandInput
               onSendMessage={handleNewCommandLocal}
-              isLoading={isLoading}
+              isLoading={isLoading || isSwitchingMode}
               connectionStatus={connectionStatus}
             />
           </div>

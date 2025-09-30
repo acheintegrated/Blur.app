@@ -333,8 +333,6 @@ policies:
     sensors_priority: 50
     tts_priority: 80
     rule: if ui_text_active then pause(sensors) resume_after_response
-    first_turn_mode: sentinel
-    first_turns_lock: 2
   timeouts:
     chat_ms: 180000
     asr_ms: 30000

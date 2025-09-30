@@ -1,42 +1,38 @@
 #!/usr/bin/env python3
-# convo_chat_core.py — Reforged v7.3 (TTFT-boosted + KV persist + tone punch)
-# - BLUR_HOME-first (no bundled fallbacks). All paths resolve via BLUR_HOME/BLUR_CONFIG_PATH.
-# - Chat vessel n_ctx SAFE-LOAD: backs off (requested → 8192 → 4096 → 2048 → 1024 → 512).
-# - Persistent RAG: strict JSONL↔FAISS ID alignment, tolerant rebuild, hot-reload/search endpoints.
-# - Ephemeral RAG + User memory unchanged (now vector-cached for TTFT).
-# - Whisper optional; quiet llama logs.
-# - Sessions: state under BLUR_HOME by default, legacy ~/.blur migration, autosave each turn + periodic.
-# - TTFT Upgrades:
-#     * cache_prompt=True for llama_cpp to reuse KV for system+history
-#     * persistent KV via session_file + use_mlock/use_mmap
-#     * one-time KV prefill (max_tokens=0) per session
-#     * user-memory vector RAM cache (no re-encode per fragment)
-#     * tuned llama init: n_threads, n_batch, mmap, mlock
-#     * prompt byte caps + smaller default n_predict
-#     * X-TTFT-Last header exposed on /generate_response
-# - Tone Upgrades:
-#     * sanitizer disabled by default (dev)
-#     * punch_up_text de-hedges + injects light slang for edge modes
+# convo_chat_core.py — Reforged v9.1 (Manifest-True, Qwen-only, Strict RAG)
+# - Manifest is the single source of truth (no path guessing). ${meta.homes.*}, ${BLUR_HOME} resolved.
+# - Chat vessel: chat.vessel_key (qwen3_4b_unified). No other models loaded.
+# - Persistent RAG: uses memory.vector_store.{path,chunks_path,embed_model,ttl_days_persistent,auto_compact_on_start}
+#   * Rebuilds index if: missing, id/count mismatch, or dim != embedder dim
+#   * Enforces JSONL ids stable [0..N-1] (auto-fix missing ids)
+# - Ephemeral RAG: uses rag.ephemeral.{max_total,max_per_session,ttl_seconds}
+# - Assembly sizes: assembly.history_turns / keep_history
+# - Language hysteresis: language.hysteresis_consecutive
+# - Mode params/endings from range.modes.{dream,astrofuck,sentinel}
+# - Acheflip hook stubbed from philosophy.acheflip.* (no external runner required)
+# - Streaming: plain text chunks; exposes X-Session-ID + X-TTFT-Last
 
-import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, base64, io, tempfile, random, hashlib, inspect
+import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, io, tempfile, hashlib, inspect, base64
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import numpy as np
 
-# Quiet llama/ggml spam before import
+# Quiet spam
 os.environ.setdefault("GGML_LOG_LEVEL", "WARN")
 
 # ---------- Third-party deps ----------
-from pydub import AudioSegment
+try:
+    from llama_cpp import Llama
+except Exception as e:
+    print("🛑 llama_cpp required: pip install llama-cpp-python", e, file=sys.stderr); raise
+
 try:
     from faster_whisper import WhisperModel
 except Exception:
-    WhisperModel = None  # lazy, optional
+    WhisperModel = None  # optional
 
-from llama_cpp import Llama
-
+# ---------- FastAPI ----------
 from fastapi import FastAPI, Request as FastAPIRequest
-from fastapi import UploadFile, File, Form
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
 try:
@@ -44,13 +40,6 @@ try:
 except Exception:
     ORJSONResponse = JSONResponse  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware
-
-# ---------- OPTIONAL: multipart ----------
-try:
-    import multipart  # python-multipart
-    _HAS_MULTIPART = True
-except Exception:
-    _HAS_MULTIPART = False
 
 # ---------- LOGGING ----------
 for h in logging.root.handlers[:]:
@@ -62,89 +51,46 @@ log = logging.getLogger("core")
 BLUR_HOME = os.path.expanduser(os.getenv("BLUR_HOME", "~/blur"))
 MANIFEST_PATH = os.path.expanduser(os.getenv("BLUR_CONFIG_PATH", os.path.join(BLUR_HOME, "config.yaml")))
 
-# State lives alongside BLUR_HOME (App Support/Blur by default)
 STATE_DIR = os.path.expanduser(os.getenv("BLUR_STATE_DIR", BLUR_HOME))
 Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
 SESSIONS_FILE = os.path.join(STATE_DIR, "sessions.json")
 USER_MEMORY_FILE = os.path.join(STATE_DIR, "user_memory.json")
 
-# Back-compat: migrate legacy ~/.blur/* → STATE_DIR on first run
-LEGACY_SESSIONS_FILE = os.path.expanduser("~/.blur/sessions.json")
-LEGACY_USER_MEMORY_FILE = os.path.expanduser("~/.blur/user_memory.json")
-try:
-    if os.path.exists(LEGACY_SESSIONS_FILE) and not os.path.exists(SESSIONS_FILE):
-        with open(LEGACY_SESSIONS_FILE, "r") as f_in, open(SESSIONS_FILE, "w") as f_out:
-            f_out.write(f_in.read())
-        logging.info(f"Migrated legacy sessions.json → {SESSIONS_FILE}")
-    if os.path.exists(LEGACY_USER_MEMORY_FILE) and not os.path.exists(USER_MEMORY_FILE):
-        with open(LEGACY_USER_MEMORY_FILE, "r") as f_in, open(USER_MEMORY_FILE, "w") as f_out:
-            f_out.write(f_in.read())
-        logging.info(f"Migrated legacy user_memory.json → {USER_MEMORY_FILE}")
-except Exception as e:
-    logging.error(f"Legacy migration failed: {e}")
-
-DEFAULT_HISTORY_TURNS_FOR_PROMPT = 12  # override via manifest if you want 8 for speed
+DEFAULT_HISTORY_TURNS_FOR_PROMPT = 12
 DEFAULT_KEEP_HISTORY = 100
 
 manifest: Dict[str, Any] = {}
 homes: Dict[str, str] = {}
 
-# Vessel registry + locks
 _VESSEL_LOCK = asyncio.Lock()
 llm_vessels: Dict[str, Llama] = {}
 vessel_details: Dict[str, Dict[str, Any]] = {}
 sessions: Dict[str, Dict[str, Any]] = {}
 last_seen_session_id: Optional[str] = None
 
-# Embedding singleton
 _embed_lock = asyncio.Lock()
 _embed_llm: Optional[Llama] = None
 _embed_dim: Optional[int] = None
 
-# Memory vector cache (RAM only)
-_MEMVEC: Dict[str, np.ndarray] = {}  # sha1(text) -> L2-normalized vector
+_MEMVEC: Dict[str, np.ndarray] = {}
 
-# Autosave
-_AUTOSAVE_TASK: Optional[asyncio.Task] = None
-_AUTOSAVE_EVERY_SEC = int(os.getenv("BLUR_AUTOSAVE_SEC", "10"))
+TTFT_LAST: Optional[float] = None
 
-# ---------- USER MEMORY ----------
-user_memory_chunks: Dict[str, List[Dict[str, Any]]] = {}
-user_memory_lock = threading.Lock()
-MAX_USER_MEMORY_CHUNKS = 50
-USER_MEMORY_TTL_DAYS = 90  # reserved; not enforced here
-
-# ---------- EPHEMERAL UI RAG ----------
-EPHEMERAL_RAG_ENABLED = True
-MAX_RAG_CHUNKS_TOTAL = 5000
-MAX_RAG_CHUNKS_PER_SESSION = 1500
-EPHEMERAL_TTL_SECONDS = 60 * 30  # 30 min
-
+# Ephemeral RAG state
 rag_index: Optional[faiss.Index] = None
 knowledge_chunks: List[Dict[str, Any]] = []
 rag_lock = threading.Lock()
 
-SUPPORTED_TYPES = {'.txt', '.md', '.pdf', '.docx', '.csv'}
-
-# ---------- WHISPER ----------
-WHISPER_ROOT      = os.path.expanduser(os.getenv("BLUR_WHISPER_ROOT", os.path.join(BLUR_HOME, "models", "whisper")))
-WHISPER_MODEL_DIR = os.path.expanduser(os.getenv("BLUR_WHISPER_DIR",  os.path.join(WHISPER_ROOT, "medium.en-ct2")))
-WHISPER_MODEL_ID  = os.getenv("BLUR_WHISPER_MODEL", "medium.en")
-WHISPER_DEVICE    = os.getenv("BLUR_WHISPER_DEVICE", "cpu")
-WHISPER_COMPUTE   = os.getenv("BLUR_WHISPER_COMPUTE", "int8")
+# Whisper env mirrors your YAML (optional)
+WHISPER_ROOT      = os.path.join(BLUR_HOME, "models", "whisper")
+WHISPER_MODEL_DIR = os.path.join(WHISPER_ROOT, "medium.en-ct2")
+WHISPER_MODEL_ID  = "medium.en"
+WHISPER_DEVICE    = "cpu"
+WHISPER_COMPUTE   = "int8"
 whisper_model = None
-
-# ---------- MODE / TONE ----------
-SLANG_LEXICON = ["nah man","ye","dope","vibe check","bullshit","slice it","fartin' chaos","edgy truth","stylish flip","i don't flinch"]
-DREAM_BANS = {w.lower() for w in SLANG_LEXICON}
-
-# ---------- TTFT METRICS ----------
-TTFT_LAST: Optional[float] = None
 
 # ---------- APP ----------
 app = FastAPI(default_response_class=ORJSONResponse)
-
-# CORS: allow renderer locally or packed
 if os.getenv("BLUR_PACKAGED") == "1":
     app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID","X-TTFT-Last"])
 else:
@@ -160,9 +106,9 @@ def get_cfg(path: str, default=None):
     return node
 
 def resolve_path(path_str: str, homes_dict: dict):
-    if not isinstance(path_str, str):
-        return path_str
+    if not isinstance(path_str, str): return path_str
     s = path_str
+    # recursive expansion for ${meta.homes.*}, ${BLUR_HOME}, $ENV, ~
     for _ in range(6):
         prev = s
         for k, v in (homes_dict or {}).items():
@@ -179,7 +125,7 @@ def resolve_homes_recursive(h: dict) -> dict:
         out[k] = resolve_path(str(v), h)
     return out
 
-# --- LLM param negotiation (compat with older llama_cpp wheels) ---
+# --- llama.cpp kw guard ---
 def _llama_accepts_kw(llm: Llama, kw: str) -> bool:
     try:
         sig = inspect.signature(llm.create_chat_completion)
@@ -188,40 +134,33 @@ def _llama_accepts_kw(llm: Llama, kw: str) -> bool:
         return False
 
 def _prune_unsupported_params(llm: Llama, params: dict) -> dict:
-    safe = {}
-    for k, v in params.items():
-        if _llama_accepts_kw(llm, k):
-            safe[k] = v
-    return safe
+    return {k:v for k,v in params.items() if _llama_accepts_kw(llm, k)}
 
-# ---------- EMBEDDING (singleton) ----------
+# ---------- EMBEDDINGS ----------
 def _ensure_embedder():
-    """Idempotent embedder init (embedding=True, conservative n_ctx=512)."""
     global _embed_llm
-    if _embed_llm is not None:
-        return
-    model_key = (get_cfg("memory.vector_store.embed_model", "snowflake_arctic_embed") or "snowflake_arctic_embed")
+    if _embed_llm is not None: return
+    model_key = get_cfg("memory.vector_store.embed_model", "snowflake_arctic_embed")
     model_cfg = (manifest.get("models", {}) or {}).get(model_key, {})
     model_path = resolve_path(model_cfg.get("path", ""), homes)
     if not model_path or not os.path.exists(model_path):
-        raise RuntimeError(f"Embed model not found: key={model_key} path={model_path}")
+        raise RuntimeError(f"Embed model not found for key '{model_key}': {model_path}")
     _embed_llm = Llama(
         model_path=model_path,
         embedding=True,
-        n_ctx=512,  # embed models don't need large ctx
-        n_gpu_layers=int(get_cfg("engines.llama_cpp.n_gpu_layers", 0)),
+        n_ctx=512,
+        n_gpu_layers=int(get_cfg("engines.llama_cpp.n_gpu_layers", 0) or 0),
         n_threads=max(2, os.cpu_count() or 4),
-        n_batch=int(get_cfg("engines.llama_cpp.n_batch", 512)),
+        n_batch=int(get_cfg("engines.llama_cpp.n_batch", 512) or 512),
         use_mmap=True,
         logits_all=False,
         verbose=False,
     )
-    logging.info(f"✅ Embedder loaded: {os.path.basename(model_path)}")
+    logging.info(f"✅ Embedder online: {os.path.basename(model_path)}")
 
 def _embedding_dim() -> int:
     global _embed_dim
-    if _embed_dim is not None:
-        return _embed_dim
+    if _embed_dim is not None: return _embed_dim
     _ensure_embedder()
     probe = _embed_llm.create_embedding("dim?")['data'][0]['embedding']  # type: ignore
     _embed_dim = len(probe)
@@ -235,22 +174,15 @@ def _encode(texts: List[str]) -> np.ndarray:
     return arr
 
 def _memvec_get(text: str) -> np.ndarray:
-    """RAM cache for user-memory vectors (L2-normalized)."""
     key = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
     v = _MEMVEC.get(key)
-    if v is not None:
-        return v
+    if v is not None: return v
     v = _encode([text])[0]
     _MEMVEC[key] = v
     return v
 
 # ---------- PERSISTENT RAG ----------
 class PersistentRAG:
-    """
-    JSONL rows require an 'id' that *matches* FAISS ids.
-    On load:
-      - If an index exists and ids mismatch, rebuild from JSONL so future ids are aligned.
-    """
     def __init__(self, index_path: str, chunks_path: str, ttl_days: int = 0, auto_compact: bool = False):
         self.index_path = Path(index_path)
         self.chunks_path = Path(chunks_path)
@@ -262,8 +194,7 @@ class PersistentRAG:
         self.max_id: int = -1
 
     def _read_jsonl(self) -> List[Dict[str, Any]]:
-        if not self.chunks_path.exists():
-            return []
+        if not self.chunks_path.exists(): return []
         out = []
         with self.chunks_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -272,7 +203,10 @@ class PersistentRAG:
                 try:
                     out.append(json.loads(line))
                 except Exception:
-                    continue
+                    m = re.search(r'\{.*\}', line)
+                    if m:
+                        try: out.append(json.loads(m.group(0)))
+                        except Exception: pass
         return out
 
     def _write_jsonl(self, rows: List[Dict[str, Any]]):
@@ -287,8 +221,7 @@ class PersistentRAG:
         return faiss.IndexIDMap2(base)
 
     def _compact_by_ttl(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not self.ttl_days or self.ttl_days <= 0:
-            return rows
+        if not self.ttl_days or self.ttl_days <= 0: return rows
         cutoff = time.time() - self.ttl_days * 86400
         kept = [r for r in rows if int(r.get("ts", 0)) >= cutoff]
         return kept or rows
@@ -334,8 +267,10 @@ class PersistentRAG:
             try:
                 if self.index_path.exists():
                     idx = faiss.read_index(str(self.index_path))
-                    if isinstance(idx, faiss.IndexIDMap2):
-                        faiss_ids = self._ids_from_index(idx)
+                    if getattr(idx, 'd', None) != _embedding_dim():
+                        logging.warning("[persistent-rag] dim mismatch; rebuild")
+                    else:
+                        faiss_ids = self._ids_from_index(idx) if isinstance(idx, faiss.IndexIDMap2) else None
                         if faiss_ids is not None and len(faiss_ids) == len(rows):
                             order = list(map(int, faiss_ids))
                             by_id = {int(r["id"]): r for r in rows}
@@ -343,13 +278,16 @@ class PersistentRAG:
                             self.max_id = int(max(faiss_ids)) if len(faiss_ids) else -1
                             self.index = idx
                             need_rebuild = False
-                            logging.info(f"✅ Persistent RAG index loaded: {self.index.ntotal} vectors")
                         else:
-                            logging.warning("[persistent-rag] id/count mismatch; will rebuild")
-                    else:
-                        logging.warning("[persistent-rag] index not IDMap2; will rebuild")
+                            logging.warning("[persistent-rag] id/count mismatch or not IDMap2; rebuild")
             except Exception as e:
-                logging.warning(f"[persistent-rag] index read failed ({e}); will rebuild")
+                logging.warning(f"[persistent-rag] index read failed: {e}; rebuild")
+
+            try:
+                ids_preview = [int(r["id"]) for r in rows[:3]] + (["…"] if len(rows) > 6 else []) + [int(r["id"]) for r in rows[-3:]]
+                logging.info("[persistent-rag] chunks=%d ids(head/tail)=%s", len(rows), ids_preview)
+            except Exception:
+                logging.info("[persistent-rag] chunks=%d", len(rows))
 
             self.chunks = rows
             if need_rebuild:
@@ -376,25 +314,14 @@ class PersistentRAG:
                     out.append(r)
             return out
 
-    def add_rows(self, rows: List[Dict[str, Any]]) -> int:
-        if not rows: return 0
-        with self.lock:
-            for r in rows:
-                self.max_id += 1
-                r["id"] = self.max_id
-            vecs = _encode([r["content"] for r in rows])
-            ids_arr = np.asarray([int(r["id"]) for r in rows], dtype="int64")
-            if self.index is None:
-                self.index = self._new_index()
-            self.index.add_with_ids(vecs, ids_arr)
-            self.chunks.extend(rows)
-            self._write_jsonl(self.chunks)
-            self._save_index()
-            return len(rows)
-
 persistent_rag: Optional[PersistentRAG] = None
 
 # ---------- USER MEMORY ----------
+user_memory_chunks: Dict[str, List[Dict[str, Any]]] = {}
+user_memory_lock = threading.Lock()
+MAX_USER_MEMORY_CHUNKS = 50
+USER_MEMORY_TTL_DAYS = 90
+
 def _chunk_memory_text(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
     text = re.sub(r'\s+', ' ', text).strip()
     if not text: return []
@@ -446,51 +373,7 @@ def retrieve_user_memory(username: Optional[str], query: str, top_k: int = 3) ->
         logging.error(f"User memory retrieval error: {e}")
         return []
 
-# ---------- FILE PARSE / CHUNK ----------
-def _read_file_bytes(file_bytes: bytes, filename: str) -> str:
-    name = (filename or '').lower()
-    try:
-        if name.endswith('.txt') or name.endswith('.md'):
-            return file_bytes.decode('utf-8', errors='ignore')
-        elif name.endswith('.pdf'):
-            import fitz
-            text = []
-            with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-                if doc.is_encrypted:
-                    raise ValueError("PDF is encrypted")
-                for page in doc:
-                    text.append(page.get_text("text"))
-            return "\n".join(text)
-        elif name.endswith('.docx'):
-            from io import BytesIO
-            from docx import Document
-            doc = Document(BytesIO(file_bytes))
-            return "\n".join(p.text for p in doc.paragraphs)
-        elif name.endswith('.csv'):
-            import pandas as pd
-            from io import StringIO
-            return pd.read_csv(StringIO(file_bytes.decode('utf-8', errors='ignore'))).to_string()
-        else:
-            raise ValueError(f"Unsupported file type: {name}")
-    except Exception as e:
-        logging.error(f"Failed to read {name}: {e}")
-        raise
-
-def _chunk_text(s: str, chunk_size: int = 1600, overlap: int = 200) -> List[str]:
-    s = re.sub(r"\s+", " ", s).strip()
-    if not s: return []
-    chunks, i = [], 0
-    while i < len(s):
-        j = min(len(s), i + chunk_size)
-        cut = s[i:j]
-        k = max(cut.rfind('. '), cut.rfind('。'), cut.rfind('! '), cut.rfind('? '))
-        if k != -1 and (i + k + 1 - i) > chunk_size * 0.5:
-            j = i + k + 1
-        chunks.append(s[i:j].strip())
-        i = max(j - overlap, i + 1)
-    return [c for c in chunks if len(c) > 50]
-
-# ---------- EPHEMERAL RAG MAINT ----------
+# ---------- EPHEMERAL RAG ----------
 def _rebuild_index_from_chunks():
     global rag_index
     dim = _embedding_dim()
@@ -500,22 +383,22 @@ def _rebuild_index_from_chunks():
         idx.add(vecs)
     rag_index = idx
 
-def _evict_and_ttl_gc(session_id: Optional[str] = None):
+def _evict_and_ttl_gc(max_total: int, max_per_session: int, ttl_seconds: int, session_id: Optional[str] = None):
     global knowledge_chunks
     now = int(time.time())
-    knowledge_chunks = [m for m in knowledge_chunks if (now - int(m.get("ts", 0))) <= EPHEMERAL_TTL_SECONDS]
+    knowledge_chunks = [m for m in knowledge_chunks if (now - int(m.get("ts", 0))) <= ttl_seconds]
     if session_id:
         sess = [m for m in knowledge_chunks if m.get("session_id") == session_id]
-        if len(sess) > MAX_RAG_CHUNKS_PER_SESSION:
-            excess = len(sess) - MAX_RAG_CHUNKS_PER_SESSION
+        if len(sess) > max_per_session:
+            excess = len(sess) - max_per_session
             to_drop = set(id(m) for m in sorted(sess, key=lambda x: x.get("ts", 0))[:excess])
             knowledge_chunks = [m for m in knowledge_chunks if id(m) not in to_drop]
-    if len(knowledge_chunks) > MAX_RAG_CHUNKS_TOTAL:
-        drop_n = len(knowledge_chunks) - MAX_RAG_CHUNKS_TOTAL
+    if len(knowledge_chunks) > max_total:
+        drop_n = len(knowledge_chunks) - max_total
         knowledge_chunks = sorted(knowledge_chunks, key=lambda x: x.get("ts", 0))[drop_n:]
     _rebuild_index_from_chunks()
 
-# ---------- LANGUAGE DETECTION ----------
+# ---------- LANGUAGE ----------
 try:
     from langdetect import detect as _ld_detect
     from langdetect import DetectorFactory as _LDFactory
@@ -524,33 +407,31 @@ try:
 except Exception:
     _HAS_LANGDETECT = False
 
-_LANG_CODE_TO_NAME = {
-    "en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian","nl":"Dutch","sv":"Swedish",
-    "pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian","tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian",
-    "hi":"Hindi","bn":"Bengali","ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai",
-    "vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean","zh-cn":"Chinese","zh-tw":"Chinese (Traditional)"
-}
-
 _SLANG_EN_GREETINGS = re.compile(r"^(yo+|ye+|ya+|sup|wass?up|ayy+|hey+|hiya)\b", re.I)
+_LANG_CODE_TO_NAME = {"en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian",
+                      "nl":"Dutch","sv":"Swedish","pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian",
+                      "tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian","hi":"Hindi","bn":"Bengali",
+                      "ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai",
+                      "vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean",
+                      "zh-cn":"Chinese","zh-tw":"Chinese (Traditional)"}
 
 def detect_language_name(text: str) -> str:
     t = (text or "").strip()
-    if not t or len(t) <= 3 or _SLANG_EN_GREETINGS.match(t):
-        return "English"
-    if re.fullmatch(r"[ -~\s]+", t) and len(t.split()) <= 4:
-        return "English"
+    default_lang = get_cfg("language.default_if_unknown", "English")
+    if not t or len(t) <= 3 or _SLANG_EN_GREETINGS.match(t): return default_lang
+    if re.fullmatch(r"[ -~\s]+", t) and len(t.split()) <= 4: return default_lang
     if _HAS_LANGDETECT:
         try:
             code = _ld_detect(t)
             if code == "zh": code = "zh-cn"
-            return _LANG_CODE_TO_NAME.get(code, "English")
+            return _LANG_CODE_TO_NAME.get(code, default_lang)
         except Exception:
             pass
     if re.search(r"[\u3040-\u30FF\u4E00-\u9FFF]", t): return "Japanese"
     if re.search(r"[\uAC00-\uD7A3]", t): return "Korean"
     if re.search(r"[\u0590-\u05FF]", t): return "Hebrew"
     if re.search(r"[\u0600-\u06FF]", t): return "Arabic"
-    return "English"
+    return default_lang
 
 def language_hysteresis_update_lang(session: dict, user_text: str) -> str:
     cfg_n = int(get_cfg("language.hysteresis_consecutive", 3) or 3)
@@ -577,54 +458,39 @@ def language_hysteresis_update_lang(session: dict, user_text: str) -> str:
         return current
     return active
 
-# ---------- STYLE / SANITIZE ----------
-def sanitize_for_audience(text: str, audience: str) -> str:
-    # Dev: never sanitize. If you need public builds, guard with config.
-    return text
-    # If you want to re-enable:
-    # aliases = (get_cfg("release_aliases", {}) or {})
-    # for k, v in aliases.items():
-    #     text = re.sub(rf"(?:^|(?<!\w)){re.escape(k)}(?:(?!\w)|$)", v, text)
-    # for t in (get_cfg("filters.internal_only", []) or []):
-    #     text = re.sub(rf"(?:^|(?<!\w)){re.escape(t)}(?:(?!\w)|$)", "", text)
-    # return re.sub(r"\s{2,}", " ", text).strip()
+# ---------- STYLE / MODE ----------
+DREAM_NO_SLANG = True
 
-_ALLOWED_GLYPHS = set("↺✶⛧🜃🜂∴∵∞")
+def get_slang_lexicon() -> set:
+    # load from manifest at call-time (manifest loads after import)
+    return set(get_cfg("variety.slang_lexicon.words", []) or [])
+
+def sanitize_for_audience(text: str, audience: str) -> str:
+    # moderation off in manifest; passthrough
+    return text
+
+_ALLOWED_GLYPHS = set("↺✶⛧🜃🜂∴∵∞ø☾⊙🜫☿⟁∆⧁∃")
 _EMOJI_BLOCK = re.compile(r"[\U0001F300-\U0001FAFF]")
 def _strip_emoji_except_glyphs(text: str) -> str:
     return _EMOJI_BLOCK.sub(lambda m: m.group(0) if m.group(0) in _ALLOWED_GLYPHS else "", text)
 
-def astrofuck_ensure_slang(text: str, active_lang: str) -> str:
-    if (active_lang or "English").lower() != "english": return text
-    low = text.lower()
-    return text if any(tok in low for tok in SLANG_LEXICON) else ("Dope — let's slice it clean. " + text).strip()
-
 def enforce_persona_ending(text: str, mode: str) -> str:
     endings = get_cfg(f"range.modes.{mode}.endings", []) or []
-    return text if not endings or random.random() < 0.5 else text.rstrip() + "\n" + random.choice(endings)
+    if not endings: return text
+    return text if np.random.rand() < 0.5 else (text.rstrip() + "\n" + np.random.choice(endings))
 
-# --- Hedge killer + punch-up ---
 HEDGE_REPLACEMENTS = [
     (r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""),
     (r"\bI(?:\s+personally)?\s*think\b", "I think"),
     (r"\bI\s*believe\b", "I think"),
-    (r"\bI\s*feel\b", "I think"),
     (r"\bperhaps\b", "maybe"),
-    (r"\bpotentially\b", "maybe"),
     (r"\bIt seems\b", "Looks like"),
-    (r"\bIt appears\b", "Looks like"),
-    (r"\bWe can try to\b", "We do"),
-    (r"\bWe could\b", "We do"),
+    (r"\bWe (?:can try to|could)\b", "We do"),
     (r"\bYou might want to\b", "Do this:"),
     (r"\bConsider\b", "Do"),
     (r"\bshould\b", "will"),
 ]
-
-SOFTENER_TRIMS = [
-    (r"\s+\(let me know if that helps\)\.?$", ""),
-    (r"\s+Hope this helps\.?$", ""),
-    (r"\s+Thanks!\s*$", ""),
-]
+SOFTENER_TRIMS = [(r"\s+\(let me know if that helps\)\.?$", ""), (r"\s+Thanks!\s*$", "")]
 
 def _apply_pairs(text: str, pairs):
     for pat, rep in pairs:
@@ -632,15 +498,18 @@ def _apply_pairs(text: str, pairs):
     return text
 
 def punch_up_text(s: str, mode: str, lang: str) -> str:
-    s = _apply_pairs(s, HEDGE_REPLACEMENTS)
-    s = _apply_pairs(s, SOFTENER_TRIMS)
-    s = re.sub(r"\b(?:sorry|apolog(?:y|ise|ize)s?)\b.*?(?:\.|\n)", "", s, flags=re.I)
+    s = _apply_pairs(_apply_pairs(s, HEDGE_REPLACEMENTS), SOFTENER_TRIMS)
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"([!?])\1{1,}", r"\1", s)
-    if (lang or "English").lower() == "english" and mode in ("astrofuck", "dream"):
-        low = s.lower()
-        if not any(tok in low for tok in SLANG_LEXICON):
-            s = f"Dope — let’s slice it clean. {s}"
+    lex = get_slang_lexicon()
+    if (lang or "English").lower() == "english":
+        if mode == "astrofuck":
+            low = s.lower()
+            if lex and not any(tok in low for tok in lex):
+                s = f"Dope — let’s slice it clean. {s}"
+        elif mode == "dream" and DREAM_NO_SLANG:
+            for w in lex:
+                s = re.sub(rf"(?i)\b{re.escape(w)}\b", "", s)
     return s.strip()
 
 # ---------- PROMPT ASSEMBLY ----------
@@ -663,16 +532,32 @@ def build_messages(mode: str, system_seed: str, history: List[Dict[str, str]], u
     msgs.append({"role":"user","content":user_text})
     return msgs
 
-# ---------- RETRIEVAL (persistent ⊕ ephemeral ⊕ memory) ----------
-def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Optional[str], username: Optional[str], top_k: int = 5) -> str:
+# ---------- ACHEFLIP (stubbed based on YAML) ----------
+def maybe_inject_acheflip(text_in: str, mode: str) -> str:
+    if not get_cfg("philosophy.acheflip.enabled", True): return text_in
+    kws = set(map(str.lower, get_cfg("philosophy.acheflip.distress_keywords", []) or []))
+    distress = any(k in (text_in.lower()) for k in kws)
+    if not distress: return text_in
+    if np.random.rand() > float(get_cfg("philosophy.acheflip.nudge_probability", 0.7) or 0.7):
+        return text_in
+    nudges = get_cfg("philosophy.acheflip.nudge_templates", []) or []
+    if not nudges: return text_in
+    nudge = np.random.choice(nudges)
+    if mode == "astrofuck":
+        nudge = re.sub(r"\s+$", "", nudge) + " Ye, tiny step now."
+    return (text_in.rstrip() + "\n\n" + nudge).strip()
+
+# ---------- RETRIEVAL BLEND ----------
+def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Optional[str], username: Optional[str], top_k: int = 8) -> str:
     parts: List[str] = []
 
     persistent_parts = []
     if persistent_rag is not None:
         try:
-            rows = persistent_rag.search(query, top_k=min(3, top_k))
+            rows = persistent_rag.search(query, top_k=min(5, top_k))
             for r in rows:
-                persistent_parts.append(r.get("content","").strip())
+                c = (r.get("content","") or "").strip()
+                if c: persistent_parts.append(c)
         except Exception as e:
             logging.error(f"Persistent RAG search error: {e}")
     if persistent_parts:
@@ -689,7 +574,8 @@ def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Opt
                     meta = knowledge_chunks[i]
                     if session_id and meta.get("session_id") != session_id: continue
                     if thread_id and meta.get("thread_id") != thread_id: continue
-                    eph.append(meta.get("content",""))
+                    cc = meta.get("content","")
+                    if cc: eph.append(cc)
             if eph:
                 parts.append("--- Ephemeral Context ---\n" + "\n\n".join(eph))
         except Exception as e:
@@ -701,7 +587,7 @@ def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Opt
 
     return "\n\n".join(parts).strip()
 
-# ---------- SAFE LOAD LLM (auto ctx backoff + Metal knobs) ----------
+# ---------- SAFE LOAD LLM ----------
 def _try_load_llama(model_path: str, desired_ctx: int, n_gpu_layers: int) -> Optional[Llama]:
     base_kwargs = dict(
         model_path=model_path,
@@ -714,12 +600,10 @@ def _try_load_llama(model_path: str, desired_ctx: int, n_gpu_layers: int) -> Opt
         use_mlock=True,
         session_file=os.path.join(STATE_DIR, f"{os.path.basename(model_path)}.kv"),
     )
-    # probe once
     probe = Llama(**base_kwargs)
-    # add progressive performance knobs if accepted
     addable = {}
     for k, v in [("n_threads", max(2, os.cpu_count() or 8)),
-                 ("n_batch", int(get_cfg("engines.llama_cpp.n_batch", 1024)))]:
+                 ("n_batch", int(get_cfg("engines.llama_cpp.n_batch", 1024) or 1024))]:
         try:
             test = dict(base_kwargs); test.update(addable); test.update({k: v})
             _ = Llama(**test)
@@ -738,180 +622,155 @@ def _load_llama_with_backoff(model_path: str, requested_ctx: int, n_gpu_layers: 
         if llm:
             logging.info(f"[models] Loaded with n_ctx={ctx} (requested={requested_ctx})")
             return llm
-    raise RuntimeError(
-        f"Failed to load model at {model_path} — context too large for training window. "
-        f"Tried ctx={tried}. Lower engines.llama_cpp.python_n_ctx in config.yaml."
-    )
+    raise RuntimeError(f"Failed to load model at {model_path}; tried ctx {tried}")
 
 # ---------- MODELS ----------
-def load_llm_from_config(model_config: dict, model_key: str) -> bool:
-    """Idempotent: avoids reloading."""
-    if model_key in llm_vessels:
-        return True
-    if not isinstance(model_config, dict):
-        logging.error("Config for model '%s' is not a dict.", model_key)
-        return False
-    if model_config.get('engine') != 'llama_cpp':
-        return False
-
-    family = (model_config.get('family') or '').lower()
+def load_llm_from_config(model_key: str) -> bool:
+    if model_key in llm_vessels: return True
+    model_config = (manifest.get('models', {}) or {}).get(model_key, {})
+    if not isinstance(model_config, dict) or model_config.get('engine') != 'llama_cpp':
+        logging.error("Model config invalid or engine != llama_cpp for key %s", model_key); return False
     model_path = resolve_path(model_config.get('path', ''), homes)
-    logging.info("[models] %s -> %s exists=%s", model_key, model_path, os.path.exists(model_path))
-
     if not model_path or not os.path.exists(model_path):
-        logging.error("Model not found: %s", model_path)
-        return False
-
+        logging.error("Model not found: %s", model_path); return False
     try:
-        requested_n_ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 4096))
-        n_gpu_layers = int(get_cfg("engines.llama_cpp.n_gpu_layers", 0))
+        requested_n_ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 4096) or 4096)
+        n_gpu_layers = int(get_cfg("engines.llama_cpp.n_gpu_layers", 0) or 0)
         llm = _load_llama_with_backoff(model_path, requested_n_ctx, n_gpu_layers)
         llm_vessels[model_key] = llm
-        vessel_details[model_key] = {"family": family, "params": model_config.get("params", {}), "n_ctx": requested_n_ctx}
-        logging.info("Vessel '%s' online (%s)", model_key, family or "chat")
+        vessel_details[model_key] = {"family": (model_config.get("family") or ""), "n_ctx": requested_n_ctx}
+        logging.info("Vessel '%s' online.", model_key)
         return True
     except Exception as e:
         logging.error("Failed to load '%s': %s", model_key, e)
         return False
 
-# ---------- ENDPOINT MODELS ----------
+# ---------- API MODELS ----------
 class RequestModel(BaseModel):
     prompt: str
-    mode: str
+    mode: Optional[str] = None
     turn: Optional[int] = 0
     session_id: Optional[str] = None
     new_session: bool = False
     force_lang: Optional[str] = None
     username: Optional[str] = None
 
-class MemoryPayload(BaseModel):
+class MemoryUpsert(BaseModel):
     user: str
-    memory: str = ""
-    instructions: str = ""
-    audience: str = "internal"
+    text: str
 
 # ---------- STREAM GEN ----------
 async def generate_response_stream(session: Dict, request: RequestModel):
-    """Stream clean text chunks (no SSE framing) while preserving final post-processing for history."""
     global TTFT_LAST
     user_text = (request.prompt or "").strip()
-    req_mode = (request.mode or "dream").strip().lower()
+    req_mode = (request.mode or "astrofuck").strip().lower()
     t_start = time.time()
 
-    # mode gate
-    available_modes = get_cfg("range.modes", {}) or {}
-    mode = req_mode if req_mode in available_modes else "dream"
+    # mode gate → default astrofuck, no policy fallback
+    available_modes = set((get_cfg("range.modes", {}) or {}).keys())
+    mode = req_mode if req_mode in available_modes else "astrofuck"
 
     # language hysteresis
-    lang = language_hysteresis_update_lang(session, user_text)
+    lang = request.force_lang or language_hysteresis_update_lang(session, user_text)
 
-    # chat vessel
+    # chat vessel (qwen3_4b_unified)
     chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
     chat_llm = llm_vessels.get(chat_key)
     if not chat_llm:
         yield "Model not loaded."
         return
 
-    # ----- prompt assembly (config-driven) -----
+    # ----- SYSTEM PROMPT ASSEMBLY (mode-scoped contracts + inject) -----
     system_prompt_parts: List[str] = []
+
     system_core = get_cfg("prompts.system_core", "")
     if system_core:
         system_prompt_parts.append(system_core)
-    style_contract = get_cfg(f"prompts.style_contract_{mode}", "")
+
+    style_contract = get_cfg(
+        "prompts.style_contract_astrofuck" if mode == "astrofuck" else "prompts.style_contract_dream",
+        ""
+    )
     if style_contract:
         system_prompt_parts.append(style_contract)
+
     mode_inject = get_cfg(f"prompts.mode_tone_inject.{mode}", "")
     if mode_inject:
         system_prompt_parts.append(mode_inject)
+
     final_system_prompt = "\n\n".join(system_prompt_parts)
 
-    # retrieval blend
+    # retrieval blend (top_k = 8)
     context = retrieve_context_blend(
         user_text,
         session.get("id"),
         None,
         session.get("username") or request.username,
-        top_k=5,
+        top_k=8,
     )
     audience = (session.get("audience") or get_cfg("release.audience_default", "internal")).lower()
 
-    # Cap prompt bytes to speed TTFT
-    final_system_prompt = _cap(final_system_prompt, 2500)
-    context = _cap(context, 3500)
+    # caps to keep TTFT sharp
+    final_system_prompt = _cap(final_system_prompt, 3500)
+    context = _cap(context, 4000)
 
     # history window
-    history_pairs = session.get("history", [])[
-        -int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)) :
-    ]
+    history_pairs = session.get("history", [])[-int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)) :]
 
-    # messages
     msgs = build_messages(mode, final_system_prompt, history_pairs, user_text, context, lang)
 
-    # One-time KV prefill per session (system + history only)
+    # one-time KV prefill
     if not session.get("kv_ready"):
         try:
             prefill_params = _prune_unsupported_params(chat_llm, {
                 "messages": build_messages(mode, final_system_prompt, history_pairs, "", context, lang),
-                "max_tokens": 0,
-                "cache_prompt": True,
-                "stream": False,
+                "max_tokens": 0, "cache_prompt": True, "stream": False,
             })
             _ = chat_llm.create_chat_completion(**prefill_params)
             session["kv_ready"] = True
-            logging.info("[kv] Prefilled system+history into KV cache.")
+            logging.info("[kv] Prefilled system+history.")
         except Exception as e:
             logging.warning(f"[kv] Prefill failed (non-fatal): {e}")
 
-    # model params (per-mode)
+    # model params (mode scoped)
     mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
-    # edge-biased defaults if config is thin
-    if mode in ("astrofuck", "dream"):
-        mp.setdefault("temperature", 0.85)
-        mp.setdefault("top_p", 0.92)
-        mp.setdefault("repeat_penalty", 1.14)
-        mp.setdefault("n_predict", 888)
+    mp.setdefault("temperature", float(get_cfg("params.temperature", 0.8) or 0.8))
+    mp.setdefault("top_p", float(get_cfg("params.top_p", 0.95) or 0.95))
+    mp.setdefault("repeat_penalty", float(get_cfg("params.repeat_penalty", 1.1) or 1.1))
+    mp.setdefault("n_predict", int(get_cfg("params.n_predict", 512) or 512))
 
     raw_params = dict(
         messages=msgs,
-        temperature=float(mp.get("temperature", 0.6)),
-        top_p=float(mp.get("top_p", 0.9)),
-        repeat_penalty=float(mp.get("repeat_penalty", 1.12)),
-        max_tokens=int(mp.get("n_predict", 888)),  # lean default
+        temperature=float(mp.get("temperature")),
+        top_p=float(mp.get("top_p")),
+        repeat_penalty=float(mp.get("repeat_penalty")),
+        max_tokens=int(mp.get("n_predict")),
         stop=["</s>", "<|im_end|>", "[INST]", "[/INST]"],
         stream=True,
-        cache_prompt=True,  # 🚀 if supported
+        cache_prompt=True,
     )
     call_params = _prune_unsupported_params(chat_llm, raw_params)
 
-    # ----- live stream (clean markdown) -----
     response_text = ""
     stream_emitted_any = False
     last_error_msg = None
     first_piece_done = False
 
     async def _run_stream(call_params: dict):
-        global TTFT_LAST
         nonlocal response_text, stream_emitted_any, last_error_msg, first_piece_done, t_start, audience
         try:
             for chunk in chat_llm.create_chat_completion(**call_params):
                 choices = chunk.get("choices") or []
-                if not choices:
-                    continue
+                if not choices: continue
                 delta = choices[0].get("delta") or {}
                 piece = delta.get("content")
-                if not piece:
-                    continue  # tolerate role-only ticks
-
-                # ===== TTFT capture =====
+                if not piece: continue
                 if not first_piece_done:
                     TTFT_LAST = time.time() - t_start
                     logging.info(f"[ttft] {TTFT_LAST:.3f}s")
                     first_piece_done = True
-                # ========================
-
                 piece = piece.replace("\r\n", "\n")
                 safe_piece = sanitize_for_audience(piece, audience)
-
                 response_text += safe_piece
                 stream_emitted_any = True
                 yield safe_piece
@@ -921,128 +780,56 @@ async def generate_response_stream(session: Dict, request: RequestModel):
             last_error_msg = f"[core-error] {type(e).__name__}: {e}\n"
             yield "\n\n" + last_error_msg
 
-    # Attempt 1
+    # Attempt stream
     async for chunk in _run_stream(call_params):
         yield chunk
 
-    # If nothing came out, try without cache_prompt (some wheels choke on it)
+    # Retry without cache_prompt if dry
     if not stream_emitted_any and "cache_prompt" in call_params:
         call_params = {k: v for k, v in call_params.items() if k != "cache_prompt"}
         async for chunk in _run_stream(call_params):
             yield chunk
 
-    # Last-ditch: minimal params (just messages + stream)
+    # Minimal
     if not stream_emitted_any:
         minimal = _prune_unsupported_params(chat_llm, {"messages": msgs, "stream": True})
         async for chunk in _run_stream(minimal):
             yield chunk
 
-    # If still dry, emit a friendly error so UI doesn’t hang
     if not stream_emitted_any and not response_text.strip():
         msg = last_error_msg or "[core-error] No content generated. Check model load/params.\n"
         yield "\n\n" + msg
         return
-    
-    # ----- finalize (history only; don’t retro-stream) -----
+
+    # finalize text (mode post)
     final_text = (response_text.strip() or "…")
-    if mode == "dream":
-        t = final_text
-        for w in DREAM_BANS:
-            t = re.sub(rf"(?i)\b{re.escape(w)}\b", "", t)
-        t = re.sub(r"[ \t]{2,}", " ", t)
-        t = re.sub(r"([!?])\1{1,}", r"\1", t)
-        final_text = t.strip()
-    elif mode == "astrofuck":
-        final_text = astrofuck_ensure_slang(final_text, lang)
+    if mode == "dream" and DREAM_NO_SLANG:
+        for w in get_slang_lexicon():
+            final_text = re.sub(rf"(?i)\b{re.escape(w)}\b", "", final_text)
+    if mode == "astrofuck":
+        lex = get_slang_lexicon()
+        if lex and not any(tok in final_text.lower() for tok in lex):
+            final_text = "Dope — let’s slice it clean. " + final_text
 
-    # 🔥 tone punch
     final_text = punch_up_text(final_text, mode, lang)
-
+    final_text = maybe_inject_acheflip(final_text, mode)
     final_text = _strip_emoji_except_glyphs(final_text)
     final_text = enforce_persona_ending(final_text, mode)
 
-    # persist turn
+    # persist history within cap
     hist = session.setdefault("history", [])
     hist.append({"user": user_text, "assistant": final_text})
     session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
     session["turn"] = int(session.get("turn", 0)) + 1
-
     try:
         save_sessions()
     except Exception:
         logging.error("autosave sessions failed", exc_info=True)
 
-# ---------- INGEST ROUTES (ephemeral) ----------
-if _HAS_MULTIPART:
-    @app.post("/rag/ingest")
-    async def rag_ingest(
-        files: List[UploadFile] = File(...),
-        source: Optional[str] = Form(None),
-        thread_id: Optional[str] = Form(None),
-        http: FastAPIRequest = None
-    ):
-        if not EPHEMERAL_RAG_ENABLED:
-            return JSONResponse({"ok": False, "error": "Ephemeral RAG disabled"}, status_code=503)
-
-        global rag_index
-        try:
-            _ensure_embedder()
-            if rag_index is None:
-                rag_index = faiss.IndexFlatIP(_embedding_dim())
-
-            sid = (http.cookies.get("blur_sid") if http else None) or last_seen_session_id
-            total_added, results = 0, []
-
-            for uf in files:
-                name = uf.filename or "unnamed"
-                ext = os.path.splitext(name)[1].lower()
-
-                if ext not in SUPPORTED_TYPES:
-                    results.append({"file": name, "status": "skipped", "reason": f"unsupported {ext}"})
-                    continue
-
-                data = await uf.read()
-                if not data:
-                    results.append({"file": name, "status": "skipped", "reason": "empty"})
-                    continue
-
-                try:
-                    text = _read_file_bytes(data, name)
-                    chunks = _chunk_text(text)
-                    if not chunks:
-                        results.append({"file": name, "status": "skipped", "reason": "no text"})
-                        continue
-
-                    vecs = _encode(chunks)
-                    rows = [{
-                        "source": (source or name),
-                        "content": c,
-                        "ts": int(time.time()),
-                        "session_id": sid,
-                        "thread_id": thread_id,
-                        "filename": name
-                    } for c in chunks]
-
-                    with rag_lock:
-                        knowledge_chunks.extend(rows)
-                        rag_index.add(vecs.astype('float32', copy=False))
-                        _evict_and_ttl_gc(session_id=sid)
-
-                    total_added += len(chunks)
-                    results.append({"file": name, "status": "ok", "chunks": len(chunks)})
-                except Exception as e:
-                    logging.error("Ingest error for %s: %s", name, e)
-                    results.append({"file": name, "status": "error", "reason": str(e)})
-
-            return {"ok": True, "added": total_added, "files": results}
-
-        except Exception as e:
-            logging.error("RAG ingest error: %s", e)
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-else:
-    @app.post("/rag/ingest")
-    async def rag_ingest_unavailable():
-        return JSONResponse({"ok": False,"error": "File upload endpoint unavailable: install python-multipart","pip": "pip install python-multipart"}, status_code=503)
+# ---------- INGEST (ephemeral; disabled multipart here to keep deps minimal) ----------
+@app.post("/rag/ingest")
+async def rag_ingest_unavailable():
+    return JSONResponse({"ok": False,"error": "File upload endpoint unavailable in this build. Enable python-multipart if needed."}, status_code=503)
 
 # ---------- PERSISTENT RAG ROUTES ----------
 @app.get("/persistent/status")
@@ -1066,7 +853,7 @@ def persistent_reload():
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 @app.get("/persistent/search")
-def persistent_search(q: str, k: int = 5):
+def persistent_search(q: str, k: int = 8):
     try:
         if not persistent_rag: return {"ok": True, "results": []}
         rows = persistent_rag.search(q, top_k=int(k))
@@ -1074,7 +861,7 @@ def persistent_search(q: str, k: int = 5):
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
-# ---------- ASR ----------
+# ---------- ASR (optional) ----------
 def _init_whisper():
     global whisper_model
     if WhisperModel is None:
@@ -1092,39 +879,10 @@ def _init_whisper():
     except Exception as e:
         logging.error(f"🛑 Whisper failed: {e}"); whisper_model = None
 
-def _to_wav16k_mono(webm_bytes: bytes) -> bytes:
-    audio = AudioSegment.from_file(io.BytesIO(webm_bytes))
-    audio = audio.set_channels(1).set_frame_rate(16000)
-    buf = io.BytesIO(); audio.export(buf, format="wav")
-    return buf.getvalue()
-
-if _HAS_MULTIPART:
-    @app.post("/transcribe")
-    async def transcribe(file: UploadFile = File(...)):
-        if whisper_model is None:
-            return JSONResponse({"text": "", "error": "Whisper not loaded"}, status_code=503)
-        try:
-            raw = await file.read()
-            fname = (file.filename or "").lower()
-            wav_bytes = raw if fname.endswith(".wav") else _to_wav16k_mono(raw)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(wav_bytes); tmp_path = tmp.name
-            segments, info = whisper_model.transcribe(tmp_path, vad_filter=True, beam_size=5, word_timestamps=False)
-            text = "".join(seg.text for seg in segments).strip()
-            try: os.remove(tmp_path)
-            except Exception: pass
-            return {"text": text}
-        except Exception as e:
-            logging.error(f"Transcription error: {e}")
-            return JSONResponse({"text": "", "error": str(e)}, status_code=500)
-else:
-    @app.post("/transcribe")
-    async def transcribe_unavailable():
-        return JSONResponse({"ok": False,"error": "File upload endpoint unavailable: install python-multipart","pip": "pip install python-multipart"}, status_code=503)
-
 # ---------- HEALTH / SESSION ----------
 @app.get("/healthz")
 def healthz():
+    eph_cfg = get_cfg("rag.ephemeral", {}) or {}
     return {
         "ok": True,
         "whisper": whisper_model is not None,
@@ -1137,10 +895,12 @@ def healthz():
             "BLUR_HOME": BLUR_HOME,
             "STATE_DIR": STATE_DIR,
             "MANIFEST_PATH": MANIFEST_PATH,
-            "WHISPER_ROOT": WHISPER_ROOT,
-            "WHISPER_MODEL_DIR": WHISPER_MODEL_DIR,
         },
-        "multipart": _HAS_MULTIPART,
+        "rag_ephemeral": {
+            "max_total": int(eph_cfg.get("max_total", 5000) or 5000),
+            "max_per_session": int(eph_cfg.get("max_per_session", 1500) or 1500),
+            "ttl_seconds": int(eph_cfg.get("ttl_seconds", 1800) or 1800),
+        }
     }
 
 @app.get("/session")
@@ -1149,13 +909,14 @@ async def get_new_session():
     sid = str(uuid.uuid4())
     sessions[sid] = {
         "id": sid,
-        "mode": "dream",
+        "mode": "astrofuck",  # 🔥 hard default
         "history": [],
         "turn": 0,
         "username": None,
-        "wants": {"tone":"dream", "defaultMode":"dream", "ragAutoIngest":True},
+        "wants": {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True},
         "audience": "internal",
         "kv_ready": False,
+        "active_lang": get_cfg("language.default_if_unknown", "English"),
     }
     last_seen_session_id = sid
     resp = JSONResponse({"session_id": sid})
@@ -1167,15 +928,26 @@ async def get_new_session():
 async def handle_generate_request(req: RequestModel, http: FastAPIRequest):
     global last_seen_session_id, TTFT_LAST
     sid = (req.session_id or http.headers.get("X-Session-ID") or http.cookies.get("blur_sid") or last_seen_session_id or str(uuid.uuid4())).strip()
-    if req.new_session: sid = str(uuid.uuid4())
+    if req.new_session:
+        sid = str(uuid.uuid4())
+
     if sid not in sessions:
         sessions[sid] = {
-            "id": sid, "mode": req.mode, "history": [], "turn": 0, "username": req.username,
-            "wants": {"tone":"dream","defaultMode":"dream","ragAutoIngest":True},
-            "audience": get_cfg("release.audience_default","internal"),
+            "id": sid,
+            "mode": "astrofuck",  # 🔥 cold-start astrofuck
+            "history": [],
+            "turn": 0,
+            "username": req.username,
+            "wants": {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True},
+            "audience": "internal",
             "kv_ready": False,
+            "active_lang": get_cfg("language.default_if_unknown", "English"),
         }
-    sessions[sid]["mode"] = req.mode; last_seen_session_id = sid
+
+    # If request omitted mode, keep astrofuck
+    sessions[sid]["mode"] = (req.mode or "astrofuck").lower()
+
+    last_seen_session_id = sid
     resp = StreamingResponse(generate_response_stream(sessions[sid], req), media_type="text/plain")
     resp.headers["X-Session-ID"] = sid
     if TTFT_LAST is not None:
@@ -1198,34 +970,6 @@ async def get_status():
         "persistent_chunks_path": getattr(persistent_rag, "chunks_path", None) and str(persistent_rag.chunks_path),
     }
 
-# ---------- OPTIONAL: USER MEMORY ENDPOINTS ----------
-class MemoryUpsert(BaseModel):
-    user: str
-    text: str
-
-@app.post("/memory/upsert")
-def memory_upsert(payload: MemoryUpsert):
-    """Simple append to user memory; chunks automatically derived (vectors cached in RAM on demand)."""
-    if not payload.user or not payload.text.strip():
-        return JSONResponse({"ok": False, "error": "user and text required"}, status_code=400)
-    chunks = _chunk_memory_text(payload.text.strip())
-    if not chunks:
-        return {"ok": True, "added": 0}
-    with user_memory_lock:
-        arr = user_memory_chunks.setdefault(payload.user, [])
-        now = int(time.time())
-        for ch in chunks:
-            arr.append({"content": ch, "ts": now})
-        # cap + TTL trim
-        cutoff = now - USER_MEMORY_TTL_DAYS * 86400
-        arr[:] = [r for r in arr[-MAX_USER_MEMORY_CHUNKS:] if r.get("ts", 0) >= cutoff]
-    try:
-        save_user_memory()
-    except Exception:
-        logging.error("Failed to save user memory", exc_info=True)
-    return {"ok": True, "added": len(chunks)}
-
-# ---------- DEBUG / DIAGNOSTICS ----------
 @app.get("/debug/paths")
 def debug_paths():
     chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
@@ -1249,7 +993,6 @@ def debug_paths():
 
 @app.get("/config/current")
 def config_current():
-    """Return the resolved manifest (safe subset) + key params to confirm tone diffs."""
     return {
         "manifest_path": MANIFEST_PATH,
         "chat": manifest.get("chat", {}),
@@ -1267,7 +1010,7 @@ def config_current():
         },
     }
 
-# ---------- STARTUP / SHUTDOWN ----------
+# ---------- SESSIONS I/O ----------
 def _ensure_state_dir():
     try:
         Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
@@ -1275,7 +1018,6 @@ def _ensure_state_dir():
         logging.error(f"Failed to create state dir {STATE_DIR}: {e}")
 
 def load_sessions():
-    """Load sessions from disk and normalize fields."""
     global sessions
     _ensure_state_dir()
     if os.path.exists(SESSIONS_FILE):
@@ -1291,10 +1033,11 @@ def load_sessions():
                 else:
                     data["history"] = []
                 data.setdefault("username", None)
-                data.setdefault("wants", {"tone": "dream", "defaultMode": "dream", "ragAutoIngest": True})
-                data.setdefault("audience", get_cfg("release.audience_default", "internal"))
+                data.setdefault("wants", {"tone": "astrofuck", "defaultMode": "astrofuck", "ragAutoIngest": True})
+                data.setdefault("audience", "internal")
                 data.setdefault("turn", len(data["history"]))
                 data.setdefault("kv_ready", False)
+                data.setdefault("active_lang", get_cfg("language.default_if_unknown","English"))
                 sessions[sid] = data
             logging.info("Loaded %d sessions from %s", len(sessions), SESSIONS_FILE)
         except Exception as e:
@@ -1304,7 +1047,6 @@ def load_sessions():
         sessions = {}
 
 def save_sessions():
-    """Persist sessions atomically to avoid tearing."""
     try:
         _ensure_state_dir()
         tmp = SESSIONS_FILE + ".tmp"
@@ -1314,6 +1056,7 @@ def save_sessions():
     except Exception as e:
         logging.error("Failed to save sessions: %s", e)
 
+# ---------- STARTUP / SHUTDOWN ----------
 @app.on_event("startup")
 async def startup_event():
     global manifest, homes, rag_index, persistent_rag
@@ -1322,48 +1065,38 @@ async def startup_event():
         _ensure_state_dir()
 
         if not os.path.exists(MANIFEST_PATH):
-            logging.error(f"🛑 FATAL: Manifest file not found at '{MANIFEST_PATH}'. Core will not start.")
-            raise FileNotFoundError(f"Manifest file not found at the required path: {MANIFEST_PATH}")
+            logging.error(f"🛑 Manifest file not found: {MANIFEST_PATH}")
+            raise FileNotFoundError(MANIFEST_PATH)
 
         with open(MANIFEST_PATH, 'r') as f:
             manifest = yaml.safe_load(f) or {}
 
-        # default chat key
+        # ensure chat vessel in manifest (qwen-only)
         manifest.setdefault("chat", {}).setdefault("vessel_key", "qwen3_4b_unified")
 
+        # resolve homes strictly from manifest
         homes_local = (manifest.get('meta', {}) or {}).get('homes', {}) or {}
         homes_local.setdefault("blur_home", BLUR_HOME)
-        homes_local.setdefault("models", os.path.join(homes_local["blur_home"], "models"))
-        homes_local.setdefault("pipes",  os.path.join(homes_local["blur_home"], "run", "pipes"))
-        homes_local.setdefault("data",   os.path.join(homes_local["blur_home"], "core"))
         homes.clear(); homes.update(resolve_homes_recursive(homes_local))
 
-        # models (idempotent)
-        for key, cfg in (manifest.get('models', {}) or {}).items():
-            await _VESSEL_LOCK.acquire()
-            try:
-                load_llm_from_config(cfg, key)
-            finally:
-                _VESSEL_LOCK.release()
-
-        # chat vessel check
+        # Load ONLY the chat vessel
         chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
-        if chat_key not in llm_vessels:
-            logging.error(f"🛑 Chat vessel '{chat_key}' not loaded. Known vessels: {list(llm_vessels.keys())}")
-        else:
-            logging.info(f"✅ Chat vessel ready: {chat_key}")
+        async with _VESSEL_LOCK:
+            if not load_llm_from_config(chat_key):
+                logging.error(f"🛑 Chat vessel '{chat_key}' failed to load.")
+            else:
+                logging.info(f"✅ Chat vessel ready: {chat_key}")
 
         # embedder + ephemeral idx
-        await _embed_lock.acquire()
-        try:
+        async with _embed_lock:
             _ensure_embedder()
-        finally:
-            _embed_lock.release()
         rag_index = faiss.IndexFlatIP(_embedding_dim())
 
-        # Persistent RAG init (BLUR_HOME-first)
-        idx_path = resolve_path(get_cfg("memory.vector_store.path", ""), homes) or os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "blur_knowledge.index")
-        ch_path  = resolve_path(get_cfg("memory.vector_store.chunks_path", ""), homes) or os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "knowledge_chunks.jsonl")
+        # Persistent RAG init (strict manifest paths)
+        idx_path = resolve_path(get_cfg("memory.vector_store.path", ""), homes)
+        ch_path  = resolve_path(get_cfg("memory.vector_store.chunks_path", ""), homes)
+        if not idx_path or not ch_path:
+            raise RuntimeError("memory.vector_store.{path,chunks_path} must be set in manifest")
         ttl_days = int(get_cfg("memory.vector_store.ttl_days_persistent", 0) or 0)
         auto_compact = bool(get_cfg("memory.vector_store.auto_compact_on_start", False))
         persistent_rag_local = PersistentRAG(index_path=idx_path, chunks_path=ch_path, ttl_days=ttl_days, auto_compact=auto_compact)
@@ -1377,7 +1110,7 @@ async def startup_event():
         load_sessions()
         load_user_memory()
         _init_whisper()
-        logging.info("Core ready (v7.3).")
+        logging.info("Core ready (v9.1).")
     except Exception as e:
         logging.error(f"FATAL on startup: {e}")
         raise e
