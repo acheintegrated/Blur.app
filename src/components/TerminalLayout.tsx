@@ -1,5 +1,5 @@
 // /opt/blurface/src/components/TerminalLayout.tsx
-// REFORGED v3.3 — Pass-through commands, full threadList to Sidebar, FIXED right-click context menu
+// REFORGED v3.4 — Wire up ContextMenu (right-click), safe delete, rename request event, preserve existing props
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './SideBar';
@@ -7,6 +7,7 @@ import { MainContent } from './MainContent';
 import { CommandInput } from './CommandInput';
 import { Settings } from './Settings';
 import { XIcon } from 'lucide-react';
+import { ContextMenu } from './ContextMenu'; // ← USE the menu
 
 interface Message {
   sender: 'Blur' | 'You' | 'System';
@@ -22,7 +23,7 @@ interface Thread {
   sessionId?: string | null;
 }
 
-// --- NEW: Context menu and rename props ---
+// --- Context menu + rename props (as given) ---
 interface ContextMenuState {
   visible: boolean;
   x: number;
@@ -51,7 +52,6 @@ interface TerminalLayoutProps {
   connectionStatus: 'initializing' | 'connecting' | 'loading_model' | 'ready' | 'error';
   onStopGeneration: () => void;
   isLoading: boolean;
-  // --- NEW: Context menu props ---
   onThreadContextMenu?: (e: React.MouseEvent, id: string) => void;
   renameState: RenameState;
   renameInputRef: React.RefObject<HTMLInputElement>;
@@ -75,8 +75,8 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     connectionStatus,
     onStopGeneration,
     isLoading,
-    // --- NEW: Destructure context menu props ---
-    onThreadContextMenu,
+    // external hooks (kept)
+    onThreadContextMenu: onThreadContextMenuExternal,
     renameState,
     renameInputRef,
     onRenameChange,
@@ -89,6 +89,9 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   const [isDragging, setIsDragging] = useState(false);
   const isResizing = useRef(false);
   const [streamingToken, setStreamingToken] = useState(0);
+
+  // --- NEW: local context-menu state
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
 
   const activeThread = threadList.find((t) => t.id === activeItem);
   const currentMessages = activeThread?.messages || [];
@@ -103,14 +106,13 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   const closeSettings = () => setShowSettings(false);
   const handleModeChange = () => onModeToggle();
 
+  // --- RESIZER
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isResizing.current) return;
     const minWidth = 220;
     const maxWidth = Math.round(window.innerWidth / 3);
     const newWidth = e.clientX;
-    if (newWidth >= minWidth && newWidth <= maxWidth) {
-      setSidebarWidth(newWidth);
-    }
+    if (newWidth >= minWidth && newWidth <= maxWidth) setSidebarWidth(newWidth);
   }, []);
 
   const handleMouseUp = useCallback(() => {
@@ -140,11 +142,92 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     };
   }, [handleMouseMove, handleMouseUp]);
 
+  // stream tick → keep MainContent refreshed
   useEffect(() => {
     const onChunk = () => setStreamingToken((t) => t + 1);
     window.addEventListener('blur:stream-chunk', onChunk as EventListener);
     return () => window.removeEventListener('blur:stream-chunk', onChunk as EventListener);
   }, []);
+
+  // --- NEW: context menu open handler (used + forwarded)
+  const handleThreadContextMenu = useCallback(
+    (e: React.MouseEvent, id: string) => {
+      e.preventDefault();
+      // bring thread into focus
+      if (id !== activeItem) setActiveItem(id);
+
+      // clamp position to viewport (basic)
+      const pad = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const x = Math.min(Math.max(e.clientX, pad), vw - 180); // ~menu width
+      const y = Math.min(Math.max(e.clientY, pad), vh - 100); // ~menu height
+
+      setCtxMenu({
+        visible: true,
+        x,
+        y,
+        itemId: id,
+        itemType: 'thread',
+      });
+
+      // still allow external hook if provided
+      if (onThreadContextMenuExternal) {
+        try { onThreadContextMenuExternal(e, id); } catch {}
+      }
+    },
+    [activeItem, onThreadContextMenuExternal, setActiveItem]
+  );
+
+  // Close menu on scroll/resize automatically
+  useEffect(() => {
+    if (!ctxMenu?.visible) return;
+    const close = () => setCtxMenu(null);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [ctxMenu?.visible]);
+
+  // --- NEW: menu actions
+  const closeMenu = () => setCtxMenu(null);
+
+  const deleteThread = () => {
+    if (!ctxMenu) return;
+    const id = ctxMenu.itemId;
+    const idx = threadList.findIndex((t) => t.id === id);
+    if (idx === -1) return;
+
+    const updated = threadList.filter((t) => t.id !== id);
+    setThreadList(updated);
+
+    // choose a new active item
+    if (activeItem === id) {
+      const fallback = updated[idx] || updated[idx - 1] || updated[0] || null;
+      setActiveItem(fallback ? fallback.id : null);
+    }
+    closeMenu();
+  };
+
+  const requestRename = () => {
+    if (!ctxMenu) return;
+    const id = ctxMenu.itemId;
+
+    // Make target active so inline input (if any) is visible
+    if (activeItem !== id) setActiveItem(id);
+
+    // Fire a rename request event so Sidebar/parent can flip renameState
+    window.dispatchEvent(new CustomEvent('blur:rename-request', { detail: { id } }));
+
+    // Try to focus existing input if parent already wired renameInputRef
+    setTimeout(() => {
+      try { renameInputRef?.current?.focus?.(); } catch {}
+    }, 0);
+
+    closeMenu();
+  };
 
   return (
     <div className="flex flex-col h-full bg-black relative">
@@ -165,8 +248,8 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
               setThreadList={setThreadList}
               sidebarCollapsed={sidebarCollapsed}
               onNewConversation={onNewConversation}
-              // --- NEW: Pass through context menu props ---
-              onThreadContextMenu={onThreadContextMenu}
+              // NOW actually used: right-click opens ContextMenu
+              onThreadContextMenu={handleThreadContextMenu}
               renameState={renameState}
               renameInputRef={renameInputRef}
               onRenameChange={onRenameChange}
@@ -247,6 +330,17 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
       </div>
 
       {showSettings && <Settings onClose={closeSettings} />}
+
+      {/* NEW: Render the context menu */}
+      {ctxMenu?.visible && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onClose={closeMenu}
+          onDelete={deleteThread}
+          onRename={requestRename}
+        />
+      )}
     </div>
   );
 };

@@ -213,7 +213,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           aria-label="new conversation"
           title="new"
         >
-          ∞ new
+          new ⇌ chat
         </button>
       </div>
 

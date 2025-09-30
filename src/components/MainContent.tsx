@@ -110,7 +110,7 @@ export const MainContent: React.FC<MainContentProps> = ({ messages, streamingTok
           className="absolute bottom-3 right-3 rounded-2xl px-3 py-1 shadow-lg bg-black/70 text-white text-sm z-10 hover:bg-black transition-colors duration-200"
           onClick={() => scrollToBottom(true)}
         >
-          jump ↓
+          ↓
         </button>
       )}
 

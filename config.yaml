@@ -270,7 +270,7 @@ engines:
       - --mul-mat-q
       - --top-k=40
       - --repeat-penalty=1.1
-      - --gpu-layers=20
+      - --gpu-layers=40
     python_n_ctx: 8192
     n_gpu_layers: 3
 

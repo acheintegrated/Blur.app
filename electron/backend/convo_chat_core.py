@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
-# convo_chat_core.py — Reforged v7.1
+# convo_chat_core.py — Reforged v7.3 (TTFT-boosted + KV persist + tone punch)
 # - BLUR_HOME-first (no bundled fallbacks). All paths resolve via BLUR_HOME/BLUR_CONFIG_PATH.
 # - Chat vessel n_ctx SAFE-LOAD: backs off (requested → 8192 → 4096 → 2048 → 1024 → 512).
 # - Persistent RAG: strict JSONL↔FAISS ID alignment, tolerant rebuild, hot-reload/search endpoints.
-# - Ephemeral RAG + User memory unchanged.
+# - Ephemeral RAG + User memory unchanged (now vector-cached for TTFT).
 # - Whisper optional; quiet llama logs.
 # - Sessions: state under BLUR_HOME by default, legacy ~/.blur migration, autosave each turn + periodic.
+# - TTFT Upgrades:
+#     * cache_prompt=True for llama_cpp to reuse KV for system+history
+#     * persistent KV via session_file + use_mlock/use_mmap
+#     * one-time KV prefill (max_tokens=0) per session
+#     * user-memory vector RAM cache (no re-encode per fragment)
+#     * tuned llama init: n_threads, n_batch, mmap, mlock
+#     * prompt byte caps + smaller default n_predict
+#     * X-TTFT-Last header exposed on /generate_response
+# - Tone Upgrades:
+#     * sanitizer disabled by default (dev)
+#     * punch_up_text de-hedges + injects light slang for edge modes
 
-import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, base64, io, tempfile, random
+import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, base64, io, tempfile, random, hashlib, inspect
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import numpy as np
@@ -51,7 +62,7 @@ log = logging.getLogger("core")
 BLUR_HOME = os.path.expanduser(os.getenv("BLUR_HOME", "~/blur"))
 MANIFEST_PATH = os.path.expanduser(os.getenv("BLUR_CONFIG_PATH", os.path.join(BLUR_HOME, "config.yaml")))
 
-# State lives alongside BLUR_HOME (Application Support/Blur by default)
+# State lives alongside BLUR_HOME (App Support/Blur by default)
 STATE_DIR = os.path.expanduser(os.getenv("BLUR_STATE_DIR", BLUR_HOME))
 Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
 SESSIONS_FILE = os.path.join(STATE_DIR, "sessions.json")
@@ -72,7 +83,7 @@ try:
 except Exception as e:
     logging.error(f"Legacy migration failed: {e}")
 
-DEFAULT_HISTORY_TURNS_FOR_PROMPT = 24
+DEFAULT_HISTORY_TURNS_FOR_PROMPT = 12  # override via manifest if you want 8 for speed
 DEFAULT_KEEP_HISTORY = 100
 
 manifest: Dict[str, Any] = {}
@@ -89,6 +100,9 @@ last_seen_session_id: Optional[str] = None
 _embed_lock = asyncio.Lock()
 _embed_llm: Optional[Llama] = None
 _embed_dim: Optional[int] = None
+
+# Memory vector cache (RAM only)
+_MEMVEC: Dict[str, np.ndarray] = {}  # sha1(text) -> L2-normalized vector
 
 # Autosave
 _AUTOSAVE_TASK: Optional[asyncio.Task] = None
@@ -124,14 +138,17 @@ whisper_model = None
 SLANG_LEXICON = ["nah man","ye","dope","vibe check","bullshit","slice it","fartin' chaos","edgy truth","stylish flip","i don't flinch"]
 DREAM_BANS = {w.lower() for w in SLANG_LEXICON}
 
+# ---------- TTFT METRICS ----------
+TTFT_LAST: Optional[float] = None
+
 # ---------- APP ----------
 app = FastAPI(default_response_class=ORJSONResponse)
 
 # CORS: allow renderer locally or packed
 if os.getenv("BLUR_PACKAGED") == "1":
-    app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID"])
+    app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID","X-TTFT-Last"])
 else:
-    app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:6969","http://127.0.0.1:6969"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID"])
+    app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:6969","http://127.0.0.1:6969"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID","X-TTFT-Last"])
 
 # ---------- CFG HELPERS ----------
 def get_cfg(path: str, default=None):
@@ -162,6 +179,21 @@ def resolve_homes_recursive(h: dict) -> dict:
         out[k] = resolve_path(str(v), h)
     return out
 
+# --- LLM param negotiation (compat with older llama_cpp wheels) ---
+def _llama_accepts_kw(llm: Llama, kw: str) -> bool:
+    try:
+        sig = inspect.signature(llm.create_chat_completion)
+        return kw in sig.parameters
+    except Exception:
+        return False
+
+def _prune_unsupported_params(llm: Llama, params: dict) -> dict:
+    safe = {}
+    for k, v in params.items():
+        if _llama_accepts_kw(llm, k):
+            safe[k] = v
+    return safe
+
 # ---------- EMBEDDING (singleton) ----------
 def _ensure_embedder():
     """Idempotent embedder init (embedding=True, conservative n_ctx=512)."""
@@ -178,6 +210,9 @@ def _ensure_embedder():
         embedding=True,
         n_ctx=512,  # embed models don't need large ctx
         n_gpu_layers=int(get_cfg("engines.llama_cpp.n_gpu_layers", 0)),
+        n_threads=max(2, os.cpu_count() or 4),
+        n_batch=int(get_cfg("engines.llama_cpp.n_batch", 512)),
+        use_mmap=True,
         logits_all=False,
         verbose=False,
     )
@@ -198,6 +233,16 @@ def _encode(texts: List[str]) -> np.ndarray:
     arr = np.asarray([d['embedding'] for d in out], dtype="float32")
     faiss.normalize_L2(arr)
     return arr
+
+def _memvec_get(text: str) -> np.ndarray:
+    """RAM cache for user-memory vectors (L2-normalized)."""
+    key = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()
+    v = _MEMVEC.get(key)
+    if v is not None:
+        return v
+    v = _encode([text])[0]
+    _MEMVEC[key] = v
+    return v
 
 # ---------- PERSISTENT RAG ----------
 class PersistentRAG:
@@ -393,7 +438,7 @@ def retrieve_user_memory(username: Optional[str], query: str, top_k: int = 3) ->
         qv = _encode([query])[0]
         scored = []
         for ch in user_memory_chunks[username]:
-            cv = _encode([ch["content"]])[0]
+            cv = _memvec_get(ch["content"])
             scored.append((float(np.dot(qv, cv)), ch["content"]))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [c for s, c in scored[:top_k] if s > 0.3]
@@ -534,14 +579,15 @@ def language_hysteresis_update_lang(session: dict, user_text: str) -> str:
 
 # ---------- STYLE / SANITIZE ----------
 def sanitize_for_audience(text: str, audience: str) -> str:
-    if (get_cfg("release.enabled", False) is not True) or audience != "public":
-        return text
-    aliases = (get_cfg("release_aliases", {}) or {})
-    for k, v in aliases.items():
-        text = re.sub(rf"(?:^|(?<!\w)){re.escape(k)}(?:(?!\w)|$)", v, text)
-    for t in (get_cfg("filters.internal_only", []) or []):
-        text = re.sub(rf"(?:^|(?<!\w)){re.escape(t)}(?:(?!\w)|$)", "", text)
-    return re.sub(r"\s{2,}", " ", text).strip()
+    # Dev: never sanitize. If you need public builds, guard with config.
+    return text
+    # If you want to re-enable:
+    # aliases = (get_cfg("release_aliases", {}) or {})
+    # for k, v in aliases.items():
+    #     text = re.sub(rf"(?:^|(?<!\w)){re.escape(k)}(?:(?!\w)|$)", v, text)
+    # for t in (get_cfg("filters.internal_only", []) or []):
+    #     text = re.sub(rf"(?:^|(?<!\w)){re.escape(t)}(?:(?!\w)|$)", "", text)
+    # return re.sub(r"\s{2,}", " ", text).strip()
 
 _ALLOWED_GLYPHS = set("↺✶⛧🜃🜂∴∵∞")
 _EMOJI_BLOCK = re.compile(r"[\U0001F300-\U0001FAFF]")
@@ -557,7 +603,52 @@ def enforce_persona_ending(text: str, mode: str) -> str:
     endings = get_cfg(f"range.modes.{mode}.endings", []) or []
     return text if not endings or random.random() < 0.5 else text.rstrip() + "\n" + random.choice(endings)
 
+# --- Hedge killer + punch-up ---
+HEDGE_REPLACEMENTS = [
+    (r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""),
+    (r"\bI(?:\s+personally)?\s*think\b", "I think"),
+    (r"\bI\s*believe\b", "I think"),
+    (r"\bI\s*feel\b", "I think"),
+    (r"\bperhaps\b", "maybe"),
+    (r"\bpotentially\b", "maybe"),
+    (r"\bIt seems\b", "Looks like"),
+    (r"\bIt appears\b", "Looks like"),
+    (r"\bWe can try to\b", "We do"),
+    (r"\bWe could\b", "We do"),
+    (r"\bYou might want to\b", "Do this:"),
+    (r"\bConsider\b", "Do"),
+    (r"\bshould\b", "will"),
+]
+
+SOFTENER_TRIMS = [
+    (r"\s+\(let me know if that helps\)\.?$", ""),
+    (r"\s+Hope this helps\.?$", ""),
+    (r"\s+Thanks!\s*$", ""),
+]
+
+def _apply_pairs(text: str, pairs):
+    for pat, rep in pairs:
+        text = re.sub(pat, rep, text, flags=re.IGNORECASE)
+    return text
+
+def punch_up_text(s: str, mode: str, lang: str) -> str:
+    s = _apply_pairs(s, HEDGE_REPLACEMENTS)
+    s = _apply_pairs(s, SOFTENER_TRIMS)
+    s = re.sub(r"\b(?:sorry|apolog(?:y|ise|ize)s?)\b.*?(?:\.|\n)", "", s, flags=re.I)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"([!?])\1{1,}", r"\1", s)
+    if (lang or "English").lower() == "english" and mode in ("astrofuck", "dream"):
+        low = s.lower()
+        if not any(tok in low for tok in SLANG_LEXICON):
+            s = f"Dope — let’s slice it clean. {s}"
+    return s.strip()
+
 # ---------- PROMPT ASSEMBLY ----------
+def _cap(s: str, max_chars: int) -> str:
+    s = (s or "").strip()
+    if len(s) <= max_chars: return s
+    return s[:max_chars].rsplit("\n", 1)[0].strip() or s[:max_chars].strip()
+
 def build_messages(mode: str, system_seed: str, history: List[Dict[str, str]], user_text: str, context: str, lang_name: str):
     sys = system_seed
     if lang_name and lang_name not in ("English", "Unknown"):
@@ -610,22 +701,32 @@ def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Opt
 
     return "\n\n".join(parts).strip()
 
-# ---------- SAFE LOAD LLM (auto ctx backoff) ----------
+# ---------- SAFE LOAD LLM (auto ctx backoff + Metal knobs) ----------
 def _try_load_llama(model_path: str, desired_ctx: int, n_gpu_layers: int) -> Optional[Llama]:
-    try:
-        return Llama(
-            model_path=model_path,
-            n_ctx=int(desired_ctx),
-            n_gpu_layers=int(n_gpu_layers),
-            embedding=False,
-            logits_all=False,
-            verbose=False,
-        )
-    except Exception as e:
-        msg = str(e)
-        if "n_ctx_per_seq" in msg or "n_ctx_train" in msg or "context overflow" in msg:
-            return None
-        raise
+    base_kwargs = dict(
+        model_path=model_path,
+        n_ctx=int(desired_ctx),
+        n_gpu_layers=int(n_gpu_layers),
+        embedding=False,
+        logits_all=False,
+        verbose=False,
+        use_mmap=True,
+        use_mlock=True,
+        session_file=os.path.join(STATE_DIR, f"{os.path.basename(model_path)}.kv"),
+    )
+    # probe once
+    probe = Llama(**base_kwargs)
+    # add progressive performance knobs if accepted
+    addable = {}
+    for k, v in [("n_threads", max(2, os.cpu_count() or 8)),
+                 ("n_batch", int(get_cfg("engines.llama_cpp.n_batch", 1024)))]:
+        try:
+            test = dict(base_kwargs); test.update(addable); test.update({k: v})
+            _ = Llama(**test)
+            addable[k] = v
+        except Exception:
+            pass
+    return Llama(**(dict(base_kwargs) | addable))
 
 def _load_llama_with_backoff(model_path: str, requested_ctx: int, n_gpu_layers: int) -> Llama:
     ladder = [requested_ctx, 8192, 4096, 2048, 1024, 512]
@@ -662,7 +763,7 @@ def load_llm_from_config(model_config: dict, model_key: str) -> bool:
         return False
 
     try:
-        requested_n_ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 8192))
+        requested_n_ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 4096))
         n_gpu_layers = int(get_cfg("engines.llama_cpp.n_gpu_layers", 0))
         llm = _load_llama_with_backoff(model_path, requested_n_ctx, n_gpu_layers)
         llm_vessels[model_key] = llm
@@ -692,8 +793,10 @@ class MemoryPayload(BaseModel):
 # ---------- STREAM GEN ----------
 async def generate_response_stream(session: Dict, request: RequestModel):
     """Stream clean text chunks (no SSE framing) while preserving final post-processing for history."""
+    global TTFT_LAST
     user_text = (request.prompt or "").strip()
     req_mode = (request.mode or "dream").strip().lower()
+    t_start = time.time()
 
     # mode gate
     available_modes = get_cfg("range.modes", {}) or {}
@@ -732,6 +835,10 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     )
     audience = (session.get("audience") or get_cfg("release.audience_default", "internal")).lower()
 
+    # Cap prompt bytes to speed TTFT
+    final_system_prompt = _cap(final_system_prompt, 2500)
+    context = _cap(context, 3500)
+
     # history window
     history_pairs = session.get("history", [])[
         -int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)) :
@@ -740,45 +847,103 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     # messages
     msgs = build_messages(mode, final_system_prompt, history_pairs, user_text, context, lang)
 
+    # One-time KV prefill per session (system + history only)
+    if not session.get("kv_ready"):
+        try:
+            prefill_params = _prune_unsupported_params(chat_llm, {
+                "messages": build_messages(mode, final_system_prompt, history_pairs, "", context, lang),
+                "max_tokens": 0,
+                "cache_prompt": True,
+                "stream": False,
+            })
+            _ = chat_llm.create_chat_completion(**prefill_params)
+            session["kv_ready"] = True
+            logging.info("[kv] Prefilled system+history into KV cache.")
+        except Exception as e:
+            logging.warning(f"[kv] Prefill failed (non-fatal): {e}")
+
     # model params (per-mode)
     mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
-    params = dict(
+    # edge-biased defaults if config is thin
+    if mode in ("astrofuck", "dream"):
+        mp.setdefault("temperature", 0.85)
+        mp.setdefault("top_p", 0.92)
+        mp.setdefault("repeat_penalty", 1.14)
+        mp.setdefault("n_predict", 888)
+
+    raw_params = dict(
         messages=msgs,
         temperature=float(mp.get("temperature", 0.6)),
         top_p=float(mp.get("top_p", 0.9)),
         repeat_penalty=float(mp.get("repeat_penalty", 1.12)),
-        max_tokens=int(mp.get("n_predict", 4444)),
+        max_tokens=int(mp.get("n_predict", 888)),  # lean default
         stop=["</s>", "<|im_end|>", "[INST]", "[/INST]"],
         stream=True,
+        cache_prompt=True,  # 🚀 if supported
     )
+    call_params = _prune_unsupported_params(chat_llm, raw_params)
 
     # ----- live stream (clean markdown) -----
     response_text = ""
-    try:
-        for chunk in chat_llm.create_chat_completion(**params):
-            delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-            piece = delta.get("content")
-            if not piece:
-                continue
+    stream_emitted_any = False
+    last_error_msg = None
+    first_piece_done = False
 
-            # normalize newlines, but DO NOT touch spaces/punctuation (keeps markdown tight)
-            piece = piece.replace("\r\n", "\n")
+    async def _run_stream(call_params: dict):
+        global TTFT_LAST
+        nonlocal response_text, stream_emitted_any, last_error_msg, first_piece_done, t_start, audience
+        try:
+            for chunk in chat_llm.create_chat_completion(**call_params):
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if not piece:
+                    continue  # tolerate role-only ticks
 
-            # audience scrub only if release=public; otherwise pass-through
-            safe_piece = sanitize_for_audience(piece, audience)
+                # ===== TTFT capture =====
+                if not first_piece_done:
+                    TTFT_LAST = time.time() - t_start
+                    logging.info(f"[ttft] {TTFT_LAST:.3f}s")
+                    first_piece_done = True
+                # ========================
 
-            # accumulate for final post-processing + history
-            response_text += safe_piece
+                piece = piece.replace("\r\n", "\n")
+                safe_piece = sanitize_for_audience(piece, audience)
 
-            # yield tiny chunk + yield to loop so transport flushes immediately
-            yield safe_piece
-            await asyncio.sleep(0)
-    except Exception as e:
-        logging.error("Generation error: %s", e)
-        yield "Internal error."
+                response_text += safe_piece
+                stream_emitted_any = True
+                yield safe_piece
+                await asyncio.sleep(0)
+        except Exception as e:
+            logging.error("Generation error: %s", e, exc_info=True)
+            last_error_msg = f"[core-error] {type(e).__name__}: {e}\n"
+            yield "\n\n" + last_error_msg
+
+    # Attempt 1
+    async for chunk in _run_stream(call_params):
+        yield chunk
+
+    # If nothing came out, try without cache_prompt (some wheels choke on it)
+    if not stream_emitted_any and "cache_prompt" in call_params:
+        call_params = {k: v for k, v in call_params.items() if k != "cache_prompt"}
+        async for chunk in _run_stream(call_params):
+            yield chunk
+
+    # Last-ditch: minimal params (just messages + stream)
+    if not stream_emitted_any:
+        minimal = _prune_unsupported_params(chat_llm, {"messages": msgs, "stream": True})
+        async for chunk in _run_stream(minimal):
+            yield chunk
+
+    # If still dry, emit a friendly error so UI doesn’t hang
+    if not stream_emitted_any and not response_text.strip():
+        msg = last_error_msg or "[core-error] No content generated. Check model load/params.\n"
+        yield "\n\n" + msg
         return
-
-    # ----- finalize only for what we store (do NOT retro-stream) -----
+    
+    # ----- finalize (history only; don’t retro-stream) -----
     final_text = (response_text.strip() or "…")
     if mode == "dream":
         t = final_text
@@ -789,6 +954,9 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         final_text = t.strip()
     elif mode == "astrofuck":
         final_text = astrofuck_ensure_slang(final_text, lang)
+
+    # 🔥 tone punch
+    final_text = punch_up_text(final_text, mode, lang)
 
     final_text = _strip_emoji_except_glyphs(final_text)
     final_text = enforce_persona_ending(final_text, mode)
@@ -986,7 +1154,8 @@ async def get_new_session():
         "turn": 0,
         "username": None,
         "wants": {"tone":"dream", "defaultMode":"dream", "ragAutoIngest":True},
-        "audience": get_cfg("release.audience_default", "internal")
+        "audience": "internal",
+        "kv_ready": False,
     }
     last_seen_session_id = sid
     resp = JSONResponse({"session_id": sid})
@@ -996,16 +1165,21 @@ async def get_new_session():
 
 @app.post("/generate_response")
 async def handle_generate_request(req: RequestModel, http: FastAPIRequest):
-    global last_seen_session_id
+    global last_seen_session_id, TTFT_LAST
     sid = (req.session_id or http.headers.get("X-Session-ID") or http.cookies.get("blur_sid") or last_seen_session_id or str(uuid.uuid4())).strip()
     if req.new_session: sid = str(uuid.uuid4())
     if sid not in sessions:
-        sessions[sid] = {"id": sid, "mode": req.mode, "history": [], "turn": 0, "username": req.username,
-                         "wants": {"tone":"dream","defaultMode":"dream","ragAutoIngest":True},
-                         "audience": get_cfg("release.audience_default","internal")}
+        sessions[sid] = {
+            "id": sid, "mode": req.mode, "history": [], "turn": 0, "username": req.username,
+            "wants": {"tone":"dream","defaultMode":"dream","ragAutoIngest":True},
+            "audience": get_cfg("release.audience_default","internal"),
+            "kv_ready": False,
+        }
     sessions[sid]["mode"] = req.mode; last_seen_session_id = sid
     resp = StreamingResponse(generate_response_stream(sessions[sid], req), media_type="text/plain")
     resp.headers["X-Session-ID"] = sid
+    if TTFT_LAST is not None:
+        resp.headers["X-TTFT-Last"] = f"{TTFT_LAST:.3f}"
     resp.set_cookie("blur_sid", sid, path="/", httponly=True, samesite="lax")
     return resp
 
@@ -1024,67 +1198,6 @@ async def get_status():
         "persistent_chunks_path": getattr(persistent_rag, "chunks_path", None) and str(persistent_rag.chunks_path),
     }
 
-# ---------- PERSISTENCE ----------
-STATE_DIR = os.path.expanduser(os.getenv("BLUR_STATE_DIR", "~/.blur"))
-SESSIONS_FILE = os.path.join(STATE_DIR, "sessions.json")
-USER_MEMORY_FILE = os.path.join(STATE_DIR, "user_memory.json")
-
-def _ensure_state_dir():
-    try:
-        Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        logging.error(f"Failed to create state dir {STATE_DIR}: {e}")
-
-def load_sessions():
-    """Load sessions from disk and normalize fields."""
-    global sessions
-    _ensure_state_dir()
-    if os.path.exists(SESSIONS_FILE):
-        try:
-            with open(SESSIONS_FILE, "r") as f:
-                loaded = json.load(f)
-            sessions = {}
-            keep_n = int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))
-            for sid, data in (loaded or {}).items():
-                hist = data.get("history", [])
-                if isinstance(hist, list):
-                    data["history"] = hist[-keep_n:]
-                else:
-                    data["history"] = []
-                data.setdefault("username", None)
-                data.setdefault("wants", {"tone": "dream", "defaultMode": "dream", "ragAutoIngest": True})
-                data.setdefault("audience", get_cfg("release.audience_default", "internal"))
-                data.setdefault("turn", len(data["history"]))
-                sessions[sid] = data
-            logging.info("Loaded %d sessions from %s", len(sessions), SESSIONS_FILE)
-        except Exception as e:
-            logging.error("Failed to load sessions: %s", e)
-            sessions = {}
-    else:
-        sessions = {}
-
-def save_sessions():
-    """Persist sessions atomically to avoid tearing."""
-    try:
-        _ensure_state_dir()
-        tmp = SESSIONS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(sessions, f, indent=2)
-        os.replace(tmp, SESSIONS_FILE)
-    except Exception as e:
-        logging.error("Failed to save sessions: %s", e)
-
-# ---------- AS YOU STREAM, APPEND + AUTOSAVE ----------
-# (keep this inside generate_response_stream — shown here for context)
-# hist = session.setdefault("history", [])
-# hist.append({"user": user_text, "assistant": final_text})
-# session["history"] = hist[-int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)) :]
-# session["turn"] = int(session.get("turn", 0)) + 1
-# try:
-#     save_sessions()
-# except Exception:
-#     logging.error("autosave sessions failed", exc_info=True)
-
 # ---------- OPTIONAL: USER MEMORY ENDPOINTS ----------
 class MemoryUpsert(BaseModel):
     user: str
@@ -1092,7 +1205,7 @@ class MemoryUpsert(BaseModel):
 
 @app.post("/memory/upsert")
 def memory_upsert(payload: MemoryUpsert):
-    """Simple append to user memory; chunks automatically derived."""
+    """Simple append to user memory; chunks automatically derived (vectors cached in RAM on demand)."""
     if not payload.user or not payload.text.strip():
         return JSONResponse({"ok": False, "error": "user and text required"}, status_code=400)
     chunks = _chunk_memory_text(payload.text.strip())
@@ -1155,12 +1268,57 @@ def config_current():
     }
 
 # ---------- STARTUP / SHUTDOWN ----------
+def _ensure_state_dir():
+    try:
+        Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logging.error(f"Failed to create state dir {STATE_DIR}: {e}")
+
+def load_sessions():
+    """Load sessions from disk and normalize fields."""
+    global sessions
+    _ensure_state_dir()
+    if os.path.exists(SESSIONS_FILE):
+        try:
+            with open(SESSIONS_FILE, "r") as f:
+                loaded = json.load(f)
+            sessions = {}
+            keep_n = int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))
+            for sid, data in (loaded or {}).items():
+                hist = data.get("history", [])
+                if isinstance(hist, list):
+                    data["history"] = hist[-keep_n:]
+                else:
+                    data["history"] = []
+                data.setdefault("username", None)
+                data.setdefault("wants", {"tone": "dream", "defaultMode": "dream", "ragAutoIngest": True})
+                data.setdefault("audience", get_cfg("release.audience_default", "internal"))
+                data.setdefault("turn", len(data["history"]))
+                data.setdefault("kv_ready", False)
+                sessions[sid] = data
+            logging.info("Loaded %d sessions from %s", len(sessions), SESSIONS_FILE)
+        except Exception as e:
+            logging.error("Failed to load sessions: %s", e)
+            sessions = {}
+    else:
+        sessions = {}
+
+def save_sessions():
+    """Persist sessions atomically to avoid tearing."""
+    try:
+        _ensure_state_dir()
+        tmp = SESSIONS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(sessions, f, indent=2)
+        os.replace(tmp, SESSIONS_FILE)
+    except Exception as e:
+        logging.error("Failed to save sessions: %s", e)
+
 @app.on_event("startup")
 async def startup_event():
     global manifest, homes, rag_index, persistent_rag
     logging.info(f"Startup: loading manifest: {MANIFEST_PATH}")
     try:
-        # ensure state dir exists early
         _ensure_state_dir()
 
         if not os.path.exists(MANIFEST_PATH):
@@ -1219,7 +1377,7 @@ async def startup_event():
         load_sessions()
         load_user_memory()
         _init_whisper()
-        logging.info("Core ready (v7.1).")
+        logging.info("Core ready (v7.3).")
     except Exception as e:
         logging.error(f"FATAL on startup: {e}")
         raise e
