@@ -684,6 +684,60 @@ def save_session(sid: str): pass
 def load_sessions(): pass
 def save_sessions(): pass
 
+# ---------- NEW: RAG INGESTION ENDPOINT ----------
+@app.post("/rag/ingest")
+async def handle_rag_ingest(
+    files: List[UploadFile] = File(...),
+    source: str = Form("user_upload"),
+    thread_id: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None)
+):
+    if not _HAS_MULTIPART:
+        return JSONResponse(status_code=501, content={"error": "Multipart form support is not installed."})
+
+    summaries: List[Dict[str, Any]] = []
+    added_total = 0
+
+    # Get RAG limits from config
+    rag_cfg = get_cfg("rag.ephemeral", {})
+    max_total = int(rag_cfg.get("max_total", 5000))
+    max_per_session = int(rag_cfg.get("max_per_session", 1500))
+    ttl_seconds = int(rag_cfg.get("ttl_seconds", 1800))
+
+    for file in files:
+        filename = file.filename or "unknown"
+        if not any(filename.lower().endswith(ext) for ext in SUPPORTED_TYPES):
+            summaries.append({"file": filename, "status": "skipped", "reason": "unsupported file type"})
+            continue
+        try:
+            file_bytes = await file.read()
+            text_content = _read_file_bytes(file_bytes, filename)
+            chunks = _chunk_text(text_content)
+            if not chunks:
+                summaries.append({"file": filename, "status": "skipped", "reason": "no content after chunking"})
+                continue
+
+            new_docs = [
+                {
+                    "content": chunk, "source": filename, "ts": int(time.time()),
+                    "thread_id": thread_id, "session_id": session_id,
+                } for chunk in chunks
+            ]
+
+            with rag_lock:
+                knowledge_chunks.extend(new_docs)
+                _evict_and_ttl_gc(max_total, max_per_session, ttl_seconds, session_id)
+                _rebuild_index_from_chunks()
+
+            added_total += len(chunks)
+            summaries.append({"file": filename, "status": "ok", "chunks": len(chunks)})
+
+        except Exception as e:
+            log.error(f"[rag-ingest] Failed to process {filename}: {e}", exc_info=True)
+            summaries.append({"file": filename, "status": "error", "reason": str(e)})
+
+    return {"added": added_total, "files": summaries, "total_chunks": len(knowledge_chunks)}
+
 @app.on_event("startup")
 async def startup_event():
     global manifest, homes, rag_index, persistent_rag

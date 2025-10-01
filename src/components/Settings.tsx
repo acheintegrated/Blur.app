@@ -1,9 +1,13 @@
+// src/components/Settings.tsx
+
 import React, { useEffect, useState } from "react";
-import { X } from "lucide-react";              // use { X } (modern lucide)
+import { X } from "lucide-react";
 import { RainbowGlow } from "./RainbowGlow";
 import { useSettings } from "./SettingsContext";
 
-interface SettingsProps { onClose: () => void; }
+interface SettingsProps {
+  onClose: () => void;
+}
 
 export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const { settings, updateSettings } = useSettings();
@@ -13,7 +17,9 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
 
   const SAMPLE_TEXT = "Sphinx of black quartz, judge my vow. 0123456789 !@#$%";
 
-  useEffect(() => { setLocalSettings({ ...settings }); }, [settings]);
+  useEffect(() => {
+    setLocalSettings({ ...settings });
+  }, [settings]);
 
   const handleSave = async () => {
     try {
@@ -27,7 +33,7 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
 
   const updateLocalSetting = <K extends keyof typeof localSettings>(
     key: K,
-    value: (typeof localSettings)[K]
+    value: (typeof localSettings)[K],
   ) => setLocalSettings((prev) => ({ ...prev, [key]: value }));
 
   const fontOptions = [
@@ -66,7 +72,9 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 <button
                   key={tab}
                   className={`w-full text-left px-3 py-2 rounded ${
-                    activeTab === tab ? "bg-zinc-900 text-white" : "text-gray-300 hover:text-white hover:bg-zinc-900/60"
+                    activeTab === tab
+                      ? "bg-zinc-900 text-white"
+                      : "text-gray-300 hover:text-white hover:bg-zinc-900/60"
                   }`}
                   onClick={() => setActiveTab(tab)}
                 >
@@ -98,11 +106,15 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                     className={`w-12 h-6 flex items-center transition-colors duration-300 cursor-pointer ${
                       localSettings.notifications ? "bg-purple-500" : "bg-gray-700"
                     }`}
-                    onClick={() => updateLocalSetting("notifications", !localSettings.notifications)}
+                    onClick={() =>
+                      updateLocalSetting("notifications", !localSettings.notifications)
+                    }
                   >
                     <div
                       className={`w-5 h-5 bg-white shadow-md transform transition-transform duration-300 ${
-                        localSettings.notifications ? "translate-x-6" : "translate-x-1"
+                        localSettings.notifications
+                          ? "translate-x-6"
+                          : "translate-x-1"
                       }`}
                     />
                   </div>
@@ -114,11 +126,15 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                     className={`w-12 h-6 flex items-center transition-colors duration-300 cursor-pointer ${
                       localSettings.soundEffects ? "bg-purple-500" : "bg-gray-700"
                     }`}
-                    onClick={() => updateLocalSetting("soundEffects", !localSettings.soundEffects)}
+                    onClick={() =>
+                      updateLocalSetting("soundEffects", !localSettings.soundEffects)
+                    }
                   >
                     <div
                       className={`w-5 h-5 bg-white shadow-md transform transition-transform duration-300 ${
-                        localSettings.soundEffects ? "translate-x-6" : "translate-x-1"
+                        localSettings.soundEffects
+                          ? "translate-x-6"
+                          : "translate-x-1"
                       }`}
                     />
                   </div>
@@ -131,7 +147,9 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 <h2 className="text-white text-lg mb-4">instructions</h2>
                 <textarea
                   value={localSettings.instructions}
-                  onChange={(e) => updateLocalSetting("instructions", e.target.value)}
+                  onChange={(e) =>
+                    updateLocalSetting("instructions", e.target.value)
+                  }
                   className="w-full h-64 bg-zinc-900 border border-zinc-900 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
                   placeholder="i want my electron-being to function as..."
                 />
@@ -153,7 +171,9 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                     className={`w-12 h-6 flex items-center transition-colors duration-300 cursor-pointer ${
                       localSettings.autoSave ? "bg-purple-500" : "bg-gray-700"
                     }`}
-                    onClick={() => updateLocalSetting("autoSave", !localSettings.autoSave)}
+                    onClick={() =>
+                      updateLocalSetting("autoSave", !localSettings.autoSave)
+                    }
                   >
                     <div
                       className={`w-5 h-5 bg-white shadow-md transform transition-transform duration-300 ${
@@ -164,11 +184,20 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 </div>
                 {localSettings.autoSave && (
                   <div className="mt-2">
-                    <label className="block text-gray-300">Auto-save Interval (minutes)</label>
+                    <label className="block text-gray-300">
+                      Auto-save Interval (minutes)
+                    </label>
                     <input
-                      type="number" min="1" max="60"
+                      type="number"
+                      min="1"
+                      max="60"
                       value={localSettings.saveInterval}
-                      onChange={(e) => updateLocalSetting("saveInterval", parseInt(e.target.value, 10) || 1)}
+                      onChange={(e) =>
+                        updateLocalSetting(
+                          "saveInterval",
+                          parseInt(e.target.value, 10) || 1,
+                        )
+                      }
                       className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
                     />
                   </div>
@@ -180,52 +209,74 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
               <div className="space-y-6">
                 <h2 className="text-white text-lg mb-4">font settings</h2>
 
-                {/* Interface font */}
                 <div className="space-y-2">
                   <label className="block text-gray-300">interface font</label>
                   <select
                     value={localSettings.interfaceFont}
-                    onChange={(e) => updateLocalSetting("interfaceFont", e.target.value)}
+                    onChange={(e) =>
+                      updateLocalSetting("interfaceFont", e.target.value)
+                    }
                     className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white"
                     style={{ fontFamily: localSettings.interfaceFont }}
                   >
                     {fontOptions.map((f) => (
-                      <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
+                      <option
+                        key={f.value}
+                        value={f.value}
+                        style={{ fontFamily: f.value }}
+                      >
                         {f.label}
                       </option>
                     ))}
                   </select>
 
                   <div className="mt-2 rounded border border-zinc-800 bg-zinc-900 p-4">
-                    <div style={{ fontFamily: localSettings.interfaceFont }} className="text-xl text-white">
+                    <div
+                      style={{ fontFamily: localSettings.interfaceFont }}
+                      className="text-xl text-white"
+                    >
                       Interface Heading — Aa
                     </div>
-                    <div style={{ fontFamily: localSettings.interfaceFont }} className="text-sm text-gray-300 mt-1">
+                    <div
+                      style={{ fontFamily: localSettings.interfaceFont }}
+                      className="text-sm text-gray-300 mt-1"
+                    >
                       {SAMPLE_TEXT}
                     </div>
                   </div>
                 </div>
 
-                {/* Body font */}
                 <div className="space-y-2">
                   <label className="block text-gray-300">body text font</label>
                   <select
                     value={localSettings.bodyFont}
-                    onChange={(e) => updateLocalSetting("bodyFont", e.target.value)}
+                    onChange={(e) =>
+                      updateLocalSetting("bodyFont", e.target.value)
+                    }
                     className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white"
                   >
                     {fontOptions.map((f) => (
-                      <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
+                      <option
+                        key={f.value}
+                        value={f.value}
+                        style={{ fontFamily: f.value }}
+                      >
                         {f.label}
                       </option>
                     ))}
                   </select>
 
                   <div className="mt-2 rounded border border-zinc-800 bg-zinc-900 p-4">
-                    <div style={{ fontFamily: localSettings.bodyFont }} className="text-xl text-white">
+                    <div
+                      style={{ fontFamily: localSettings.bodyFont }}
+                      className="text-xl text-white"
+                    >
                       Body Heading — Aa
                     </div>
-                    <p style={{ fontFamily: localSettings.bodyFont }} className="text-base text-gray-300 mt-1 leading-7">
+                    <p
+                      style={{ fontFamily: localSettings.bodyFont }}
+                      className="text-base text-gray-300 mt-1 leading-7"
+                    >
                       {SAMPLE_TEXT}
                     </p>
                   </div>
@@ -234,11 +285,22 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
             )}
 
             {activeTab === "about" && (
-              <div className="space-y-6">
-                <h2 className="text-white text-lg mb-4">about</h2>
-                <p className="text-gray-300">version 0.0.0</p>
-                <p className="text-gray-300">ache-integrated interface for meat-beings and electron-beings to live together.</p>
-                <p className="text-gray-400 text-sm">© 2023 acheintegrated ∴ blur. all rights reserved.</p>
+              <div className="flex flex-col h-full w-full p-0">
+                <div className="flex-grow flex items-center justify-center">
+                  <div className="text-center">
+                    <h1 className="text-6xl font-bold neon-dynamic-glow-text">
+                      Blur.
+                    </h1>
+                    <p className="text-gray-500 mt-4 text-sm tracking-widest">
+                      v0.0.0
+                    </p>
+                  </div>
+                </div>
+                <div className="pb-2 text-center">
+                  <p className="text-gray-400 text-xs">
+                    © 2023 acheintegrated ∴ blur. all rights reserved.
+                  </p>
+                </div>
               </div>
             )}
           </div>

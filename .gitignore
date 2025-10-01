@@ -18,12 +18,12 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Models
-models/
+resources/models/
 
 # Python Virtual Env
-blur_env-darwin-arm64/
-blur_env-darwin-x64/
-core/.venv/
+resources/blur_env-darwin-arm64/
+resources/blur_env-darwin-x64/
+resources/core/.venv/
 
 # Llama Bin
 bin/

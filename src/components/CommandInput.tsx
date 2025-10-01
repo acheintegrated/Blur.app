@@ -3,6 +3,7 @@ import React, { useEffect, useState, useRef } from 'react';
 
 interface CommandInputProps {
   onSendMessage: (message: string, threadId?: string) => void;
+  onAddSystemMessage: (messageText: string) => void;
   connectionStatus: 'initializing' | 'connecting' | 'loading_model' | 'ready' | 'error';
   isLoading?: boolean;
   threadId: string;
@@ -10,6 +11,7 @@ interface CommandInputProps {
 
 export const CommandInput: React.FC<CommandInputProps> = ({
   onSendMessage,
+  onAddSystemMessage,
   connectionStatus,
   isLoading = false,
   threadId,
@@ -134,30 +136,44 @@ export const CommandInput: React.FC<CommandInputProps> = ({
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files?.length) return;
+
+    // ✨ UX Improvement: Notify user that upload is starting
+    const fileNames = Array.from(files).map(f => f.name).join(', ');
+    onAddSystemMessage(`Uploading ${files.length} file(s): ${fileNames}...`);
+
     const form = new FormData();
     Array.from(files).forEach(f => form.append('files', f));
     form.append('source', 'user_upload');
     form.append('thread_id', threadId);
+    
     try {
       const res = await fetch(RAG_INGEST_ENDPOINT, { method: 'POST', body: form });
       if (!res.ok) {
         const errText = await res.text();
         console.error('RAG ingest failed:', res.status, errText);
-        alert(`RAG ingest failed: ${res.status} - ${errText}`);
+        // 👇 Replace alert with a system message
+        onAddSystemMessage(`🔴 RAG ingest failed: ${res.status} - ${errText}`);
         return;
       }
       const out = await res.json();
       console.log('RAG ingest result:', out);
       const total = out?.added ?? 0;
-      const summaries = (out?.files || []).map((f: any) =>
-        `${f.file}: ${f.status}${f.chunks ? ` (${f.chunks} chunks)` : f.reason ? ` — ${f.reason}` : ''}`
-      ).join('\n');
-      alert(`RAG added ${total} chunks.\n${summaries}`);
-      if (e.target) e.target.value = '';
+      
+      const summaryText = (out?.files || [])
+        .map((f: any) => `• ${f.file}: ${f.status} ${f.chunks ? `(${f.chunks} chunks)` : ''}`)
+        .join('\n');
+
+      // 👇 Replace alert with a final confirmation message
+      onAddSystemMessage(`✅ RAG ingest complete. Added ${total} new chunks.\n${summaryText}`);
+
+      if (e.target) e.target.value = ''; // Clear the input
       setShowFileUploader(false);
+
     } catch (err) {
       console.error('RAG ingest error:', err);
-      alert(`RAG ingest error: ${err}`);
+      // 👇 Replace alert with a system message
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      onAddSystemMessage(`🔴 RAG ingest error: ${errorMessage}`);
     }
   };
 
