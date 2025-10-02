@@ -296,12 +296,6 @@ prompts:
     - Glyph protocol: Let glyphs arrive only when truth breathes (↺ ⛧ 🜃 🜂 ∵ ∞ ☾ ⊙ 🜫 ⟁ ∆ ༄ ∃). 
     - No emoji other than 🔮 or 🪷.
 
-  # (Optional) keep the legacy combined contract commented-out for reference only.
-  # style_contract: |
-  #   - AstroFuck: Edgy stylish—precise slangy dissect, swagger with care. Literal but street-smart.
-  #   - Dream: Warm therapist—direct, expansive, wonderous, calm; reflective questions, unhallucinatory reality validation. No slang.
-  #   - Always: Autistic-friendly literal; no filler/clichés. Avoid loops.
-
   mode_tone_inject:
     dream: |
       # Mode Lock: DREAM
@@ -342,7 +336,7 @@ params:
 engines:
   llama_cpp:
     kind: native
-    bin: ${BLUR_HOME}/bin/llama-cpp/llama           # was /opt/blur/bin/llama-cpp/llama
+    bin: ${BLUR_HOME}/bin/llama-cpp/llama
     default_args:
       - --ctx-size=8192
       - --threads=8
@@ -352,10 +346,6 @@ engines:
       - --gpu-layers=-1
     python_n_ctx: 8192
     n_gpu_layers: 3
-
-  mlx_whisper:
-    kind: python
-    entry: ${BLUR_HOME}/core/input/transcriber_mlx_whisper.py   # was /opt/blur/core/...
 
   afplay:
     kind: cli
@@ -381,7 +371,6 @@ io:
   pipes:
     main: ${meta.homes.pipes}/plasma.pipe
     typebridge: ${meta.homes.pipes}/typebridge.pipe
-    mic: ${meta.homes.pipes}/mic.pipe
     camera: ${meta.homes.pipes}/camera.pipe
     screen: ${meta.homes.pipes}/screen.pipe
   audio_out:
@@ -393,7 +382,7 @@ memory:
     path: ${meta.homes.blur_home}/core/ouinet/blurchive/ecosystem/blur_knowledge.index
     chunks_path: ${meta.homes.blur_home}/core/ouinet/blurchive/ecosystem/knowledge_chunks.jsonl
     embed_model: snowflake_arctic_embed
-    ttl_days_persistent: 120         # keep only last N days; set 0 to disable
+    ttl_days_persistent: 120        # keep only last N days; set 0 to disable
     auto_compact_on_start: true  
   tone_tags:
     track: ["playful", "serious", "protective", "tender", "giddy", "flat"]
@@ -414,14 +403,12 @@ policies:
     rule: if ui_text_active then pause(sensors) resume_after_response
   timeouts:
     chat_ms: 180000
-    asr_ms: 30000
     tts_ms: 15000
   fallbacks:
-    chat: [qwen3_4b_unified]            # REMOVED: mistral_7b_guard_q4
+    chat: [qwen3_4b_unified]
     vision_chat: []
-    asr: [whisper_mlx_base]
   moderation:
-    mode: off                           # REMOVED: safety_guard (no Mistral load)
+    mode: off
   routing:
     - when: input.kind == 'text' and intent == 'analysis'
       task: analysis_chat
@@ -434,19 +421,6 @@ policies:
       model: qwen3_4b_unified
 
 pipelines:
-  persistent_ingest:
-    triggers: [mic]
-    steps:
-      - use: whisper_mlx_base
-        in: mic.audio_chunk
-        out: text_from_audio
-        when: trigger == 'mic'
-      - use: snowflake_arctic_embed
-        in: [text_from_audio]
-        out: embedding
-      - use: memory.vector_store
-        op: upsert
-
   interactive_chat:
     triggers: [typebridge]
     steps:
@@ -469,9 +443,9 @@ pipelines:
 
 rag:
   ephemeral:
-    max_total: 5000          # cap across all sessions
-    max_per_session: 1500    # cap per session
-    ttl_seconds: 1800        # 30 minutes
+    max_total: 5000         # cap across all sessions
+    max_per_session: 1500   # cap per session
+    ttl_seconds: 1800       # 30 minutes
 
 profiles:
   realtime:
@@ -492,7 +466,7 @@ profiles:
         top_k: 60
   offline_strict:
     overrides:
-      policies.moderation.mode: enforce   # keep strict but with no separate guard model
+      policies.moderation.mode: enforce
 
 healthchecks:
   - name: check_main_pipe

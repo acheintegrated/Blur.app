@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# convo_chat_core.py — Reforged v9.5 (NameError Hotfix)
-# - Removes the redundant call to the undefined `_ensure_state_dir` function within the `startup_event`.
-# - This resolves the `NameError` that was causing the application to crash on startup.
-# - All other logic from v9.4 remains unchanged.
+# convo_chat_core.py — Reforged v9.8 (Crash Fix)
+# - Added missing 'import hashlib' to fix NameError on startup.
+# - Whisper and Ephemeral RAG features remain removed.
 
 from __future__ import annotations
-import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, io, tempfile, hashlib, inspect, base64
+import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, inspect, base64, hashlib
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import numpy as np
@@ -19,11 +18,6 @@ try:
 except Exception as e:
     print("🛑 llama_cpp required: pip install llama-cpp-python", e, file=sys.stderr); raise
 
-try:
-    from faster_whisper import WhisperModel
-except Exception:
-    WhisperModel = None  # optional
-
 # ---------- FastAPI ----------
 from fastapi import FastAPI, Request as FastAPIRequest
 from pydantic import BaseModel
@@ -33,14 +27,6 @@ try:
 except Exception:
     ORJSONResponse = JSONResponse  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware
-
-# --- multipart upload ---
-try:
-    from fastapi import UploadFile, File, Form
-    import multipart
-    _HAS_MULTIPART = True
-except Exception:
-    _HAS_MULTIPART = False
 
 # ---------- LOGGING ----------
 for h in logging.root.handlers[:]:
@@ -79,19 +65,6 @@ _embed_dim: Optional[int] = None
 _MEMVEC: Dict[str, np.ndarray] = {}
 
 TTFT_LAST: Optional[float] = None
-
-# Ephemeral RAG state
-rag_index: Optional[faiss.Index] = None
-knowledge_chunks: List[Dict[str, Any]] = []
-rag_lock = threading.Lock()
-
-# Whisper env mirrors your YAML (optional)
-WHISPER_ROOT      = os.path.join(BLUR_HOME, "models", "whisper")
-WHISPER_MODEL_DIR = os.path.join(WHISPER_ROOT, "medium.en-ct2")
-WHISPER_MODEL_ID  = "medium.en"
-WHISPER_DEVICE    = "cpu"
-WHISPER_COMPUTE   = "int8"
-whisper_model = None
 
 user_memory_chunks: Dict[str, List[Dict[str, Any]]] = {}
 user_memory_indexes: Dict[str, faiss.Index] = {}  # per-user FAISS
@@ -193,7 +166,7 @@ def _query_vec_cached(query: str, sid: Optional[str], tid: Optional[str]) -> np.
         _recent_qv_cache.pop(next(iter(_recent_qv_cache)))
     return v
 
-# ---------- PERSISTENT RAG & USER MEMORY (Implementations from v9.4) ----------
+# ---------- PERSISTENT RAG & USER MEMORY ----------
 class PersistentRAG:
     def __init__(self, index_path: str, chunks_path: str, ttl_days: int = 0, auto_compact: bool = False):
         self.index_path = Path(index_path)
@@ -364,82 +337,6 @@ def retrieve_user_memory(username: Optional[str], query: str, top_k: int = 3) ->
         logging.error(f"[user-mem] retrieval error for {username}: {e}")
         return []
 
-# ---------- FILE PARSE / CHUNK ----------
-SUPPORTED_TYPES = {'.txt', '.md', '.pdf', '.docx', '.csv'}
-
-def _read_file_bytes(file_bytes: bytes, filename: str) -> str:
-    name = (filename or '').lower()
-    try:
-        if name.endswith('.txt') or name.endswith('.md'):
-            return file_bytes.decode('utf-8', errors='ignore')
-        elif name.endswith('.pdf'):
-            import fitz
-            text = []
-            with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-                if doc.is_encrypted: raise ValueError("PDF is encrypted")
-                for page in doc: text.append(page.get_text("text"))
-            return "\n".join(text)
-        elif name.endswith('.docx'):
-            from io import BytesIO
-            from docx import Document
-            doc = Document(BytesIO(file_bytes))
-            return "\n".join(p.text for p in doc.paragraphs)
-        elif name.endswith('.csv'):
-            import pandas as pd
-            from io import StringIO
-            return pd.read_csv(StringIO(file_bytes.decode('utf-8', errors='ignore'))).to_string()
-        else:
-            raise ValueError(f"Unsupported file type: {name}")
-    except Exception as e:
-        logging.error(f"Failed to read {name}: {e}")
-        raise
-
-def _chunk_text(s: str, chunk_size: int = 1600, overlap: int = 200) -> List[str]:
-    s = re.sub(r"\s+", " ", s).strip()
-    if not s: return []
-    chunks, i = [], 0
-    while i < len(s):
-        j = min(len(s), i + chunk_size)
-        cut = s[i:j]
-        k = max(cut.rfind('. '), cut.rfind('。'), cut.rfind('! '), cut.rfind('? '))
-        if k != -1 and (i + k + 1 - i) > chunk_size * 0.5:
-            j = i + k + 1
-        chunks.append(s[i:j].strip())
-        i = max(j - overlap, i + 1)
-    return [c for c in chunks if len(c) > 50]
-
-# ---------- EPHEMERAL RAG ----------
-def _rebuild_index_from_chunks():
-    global rag_index
-    dim = _embedding_dim()
-    idx = faiss.IndexFlatIP(dim)
-    if knowledge_chunks:
-        vecs: List[np.ndarray] = []
-        for m in knowledge_chunks:
-            if "vec" not in m:
-                m["vec"] = _encode([m.get("content","")])[0]
-            vecs.append(m["vec"])
-        if vecs:
-            idx.add(np.vstack(vecs).astype("float32"))
-    rag_index = idx
-
-def _evict_and_ttl_gc(max_total: int, max_per_session: int, ttl_seconds: int, session_id: Optional[str] = None):
-    global knowledge_chunks
-    now = int(time.time())
-    before = len(knowledge_chunks)
-    knowledge_chunks = [m for m in knowledge_chunks if (now - int(m.get("ts", 0))) <= ttl_seconds]
-    if session_id:
-        sess = [m for m in knowledge_chunks if m.get("session_id") == session_id]
-        if len(sess) > max_per_session:
-            excess = len(sess) - max_per_session
-            to_drop = set(id(m) for m in sorted(sess, key=lambda x: x.get("ts", 0))[:excess])
-            knowledge_chunks = [m for m in knowledge_chunks if id(m) not in to_drop]
-    if len(knowledge_chunks) > max_total:
-        drop_n = len(knowledge_chunks) - max_total
-        knowledge_chunks = sorted(knowledge_chunks, key=lambda x: x.get("ts", 0))[drop_n:]
-    if len(knowledge_chunks) != before:
-        _rebuild_index_from_chunks()
-
 # ---------- LANGUAGE ----------
 try:
     from langdetect import detect as _ld_detect
@@ -556,11 +453,6 @@ def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Opt
     qv = _query_vec_cached(query, session_id, thread_id)
     if persistent_rag and (rows := persistent_rag.search_vec(qv, top_k=min(5, top_k))):
         parts.append("--- Persistent Knowledge ---\n" + "\n\n".join(r.get("content","") for r in rows if r.get("content")))
-    if rag_index and knowledge_chunks and rag_index.ntotal > 0:
-        k = min(max(2, top_k - len(parts)), rag_index.ntotal)
-        _, I = rag_index.search(qv.reshape(1, -1).astype("float32"), k)
-        eph = [knowledge_chunks[i]["content"] for i in I[0] if 0 <= i < len(knowledge_chunks) and knowledge_chunks[i].get("content")]
-        if eph: parts.append("--- Ephemeral Context ---\n" + "\n\n".join(eph))
     if username and (um := retrieve_user_memory(username, query, top_k=3)):
         parts.append("--- Personal Memory Fragments ---\n" + "\n\n".join(um))
     return "\n\n".join(parts).strip()
@@ -684,66 +576,10 @@ def save_session(sid: str): pass
 def load_sessions(): pass
 def save_sessions(): pass
 
-# ---------- NEW: RAG INGESTION ENDPOINT ----------
-@app.post("/rag/ingest")
-async def handle_rag_ingest(
-    files: List[UploadFile] = File(...),
-    source: str = Form("user_upload"),
-    thread_id: Optional[str] = Form(None),
-    session_id: Optional[str] = Form(None)
-):
-    if not _HAS_MULTIPART:
-        return JSONResponse(status_code=501, content={"error": "Multipart form support is not installed."})
-
-    summaries: List[Dict[str, Any]] = []
-    added_total = 0
-
-    # Get RAG limits from config
-    rag_cfg = get_cfg("rag.ephemeral", {})
-    max_total = int(rag_cfg.get("max_total", 5000))
-    max_per_session = int(rag_cfg.get("max_per_session", 1500))
-    ttl_seconds = int(rag_cfg.get("ttl_seconds", 1800))
-
-    for file in files:
-        filename = file.filename or "unknown"
-        if not any(filename.lower().endswith(ext) for ext in SUPPORTED_TYPES):
-            summaries.append({"file": filename, "status": "skipped", "reason": "unsupported file type"})
-            continue
-        try:
-            file_bytes = await file.read()
-            text_content = _read_file_bytes(file_bytes, filename)
-            chunks = _chunk_text(text_content)
-            if not chunks:
-                summaries.append({"file": filename, "status": "skipped", "reason": "no content after chunking"})
-                continue
-
-            new_docs = [
-                {
-                    "content": chunk, "source": filename, "ts": int(time.time()),
-                    "thread_id": thread_id, "session_id": session_id,
-                } for chunk in chunks
-            ]
-
-            with rag_lock:
-                knowledge_chunks.extend(new_docs)
-                _evict_and_ttl_gc(max_total, max_per_session, ttl_seconds, session_id)
-                _rebuild_index_from_chunks()
-
-            added_total += len(chunks)
-            summaries.append({"file": filename, "status": "ok", "chunks": len(chunks)})
-
-        except Exception as e:
-            log.error(f"[rag-ingest] Failed to process {filename}: {e}", exc_info=True)
-            summaries.append({"file": filename, "status": "error", "reason": str(e)})
-
-    return {"added": added_total, "files": summaries, "total_chunks": len(knowledge_chunks)}
-
 @app.on_event("startup")
 async def startup_event():
-    global manifest, homes, rag_index, persistent_rag
+    global manifest, homes, persistent_rag
     logging.info(f"Startup: loading manifest: {MANIFEST_PATH}")
-    # THIS IS THE FIX: The call to `_ensure_state_dir()` is removed.
-    # The directory is already created when the STATE_DIR global is defined.
     with open(MANIFEST_PATH, 'r') as f: manifest = yaml.safe_load(f) or {}
     manifest.setdefault("chat", {}).setdefault("vessel_key", "qwen3_4b_unified")
     homes_local = (manifest.get('meta', {}) or {}).get('homes', {}) or {}
@@ -752,7 +588,7 @@ async def startup_event():
     async with _VESSEL_LOCK:
         if not load_llm_from_config(chat_key): logging.error(f"🛑 Chat vessel '{chat_key}' failed to load.")
     async with _embed_lock: _ensure_embedder()
-    rag_index = faiss.IndexFlatIP(_embedding_dim())
+    
     idx_path = resolve_path(get_cfg("memory.vector_store.path", ""), homes) or os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "blur_knowledge.index")
     ch_path  = resolve_path(get_cfg("memory.vector_store.chunks_path", ""), homes) or os.path.join(BLUR_HOME, "core", "ouinet", "blurchive", "ecosystem", "knowledge_chunks.jsonl")
     manifest.setdefault("memory", {}).setdefault("vector_store", {}).setdefault("embed_model", "snowflake_arctic_embed")
@@ -760,7 +596,7 @@ async def startup_event():
     try: persistent_rag.load()
     except Exception as e: logging.error(f"Persistent RAG load failed: {e}")
     load_sessions(); load_user_memory()
-    logging.info("Core ready (v9.5).")
+    logging.info("Core ready (v9.7).")
 
 @app.on_event("shutdown")
 def shutdown_event(): save_sessions(); save_user_memory()
