@@ -11,7 +11,8 @@ interface SettingsProps {
 
 export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const { settings, updateSettings } = useSettings();
-  const [activeTab, setActiveTab] = useState("user");
+  // Filter the initial active tab to ensure it's one of the remaining tabs
+  const [activeTab, setActiveTab] = useState<"user" | "fonts" | "about">("user");
   const [localSettings, setLocalSettings] = useState({ ...settings });
   const [saving, setSaving] = useState(false);
 
@@ -24,7 +25,11 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const handleSave = async () => {
     try {
       setSaving(true);
-      await updateSettings(localSettings);
+      // Ensure we only save the fields we still care about.
+      // TypeScript should enforce this based on the new Settings type, 
+      // but we explicitly remove 'instructions' and 'memory' just in case the context still has them.
+      const { instructions, memory, notifications, soundEffects, autoSave, saveInterval, ...restOfLocalSettings } = localSettings;
+      await updateSettings(restOfLocalSettings);
       onClose();
     } finally {
       setSaving(false);
@@ -45,6 +50,9 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
     { value: "TheanoOldStyle", label: "Theano Old Style" },
     { value: "Petrona", label: "Petrona" },
   ];
+  
+  // Define the tabs you want to keep
+  const TABS_TO_KEEP: ("user" | "fonts" | "about")[] = ["user", "fonts", "about"];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -68,7 +76,8 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
           {/* Sidebar */}
           <div className="w-1/4 border-r border-zinc-900 p-4">
             <nav className="space-y-2">
-              {["user", "instructions", "memory", "fonts", "about"].map((tab) => (
+              {/* Only map the tabs we want to keep */}
+              {TABS_TO_KEEP.map((tab) => (
                 <button
                   key={tab}
                   className={`w-full text-left px-3 py-2 rounded ${
@@ -100,110 +109,13 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                   />
                 </div>
 
-                <div className="flex items-center justify-between">
-                  <label className="text-gray-300">notifications</label>
-                  <div
-                    className={`w-12 h-6 flex items-center transition-colors duration-300 cursor-pointer ${
-                      localSettings.notifications ? "bg-purple-500" : "bg-gray-700"
-                    }`}
-                    onClick={() =>
-                      updateLocalSetting("notifications", !localSettings.notifications)
-                    }
-                  >
-                    <div
-                      className={`w-5 h-5 bg-white shadow-md transform transition-transform duration-300 ${
-                        localSettings.notifications
-                          ? "translate-x-6"
-                          : "translate-x-1"
-                      }`}
-                    />
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <label className="text-gray-300">sound effects</label>
-                  <div
-                    className={`w-12 h-6 flex items-center transition-colors duration-300 cursor-pointer ${
-                      localSettings.soundEffects ? "bg-purple-500" : "bg-gray-700"
-                    }`}
-                    onClick={() =>
-                      updateLocalSetting("soundEffects", !localSettings.soundEffects)
-                    }
-                  >
-                    <div
-                      className={`w-5 h-5 bg-white shadow-md transform transition-transform duration-300 ${
-                        localSettings.soundEffects
-                          ? "translate-x-6"
-                          : "translate-x-1"
-                      }`}
-                    />
-                  </div>
-                </div>
+                {/* REMOVED: Notifications Toggle */}
+                {/* REMOVED: Sound Effects Toggle */}
               </div>
             )}
 
-            {activeTab === "instructions" && (
-              <div className="space-y-6">
-                <h2 className="text-white text-lg mb-4">instructions</h2>
-                <textarea
-                  value={localSettings.instructions}
-                  onChange={(e) =>
-                    updateLocalSetting("instructions", e.target.value)
-                  }
-                  className="w-full h-64 bg-zinc-900 border border-zinc-900 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
-                  placeholder="i want my electron-being to function as..."
-                />
-              </div>
-            )}
-
-            {activeTab === "memory" && (
-              <div className="space-y-6">
-                <h2 className="text-white text-lg mb-4">memory</h2>
-                <textarea
-                  value={localSettings.memory}
-                  onChange={(e) => updateLocalSetting("memory", e.target.value)}
-                  className="w-full h-64 bg-zinc-900 border border-zinc-900 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
-                  placeholder="i want my electron-being to remember..."
-                />
-                <div className="flex items-center justify-between mt-2">
-                  <label className="text-gray-300">Auto-save Conversations</label>
-                  <div
-                    className={`w-12 h-6 flex items-center transition-colors duration-300 cursor-pointer ${
-                      localSettings.autoSave ? "bg-purple-500" : "bg-gray-700"
-                    }`}
-                    onClick={() =>
-                      updateLocalSetting("autoSave", !localSettings.autoSave)
-                    }
-                  >
-                    <div
-                      className={`w-5 h-5 bg-white shadow-md transform transition-transform duration-300 ${
-                        localSettings.autoSave ? "translate-x-6" : "translate-x-1"
-                      }`}
-                    />
-                  </div>
-                </div>
-                {localSettings.autoSave && (
-                  <div className="mt-2">
-                    <label className="block text-gray-300">
-                      Auto-save Interval (minutes)
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="60"
-                      value={localSettings.saveInterval}
-                      onChange={(e) =>
-                        updateLocalSetting(
-                          "saveInterval",
-                          parseInt(e.target.value, 10) || 1,
-                        )
-                      }
-                      className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
-                    />
-                  </div>
-                )}
-              </div>
-            )}
+            {/* REMOVED: {activeTab === "instructions" && (...) } */}
+            {/* REMOVED: {activeTab === "memory" && (...) } */}
 
             {activeTab === "fonts" && (
               <div className="space-y-6">

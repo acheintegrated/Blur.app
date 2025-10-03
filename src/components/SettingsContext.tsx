@@ -8,19 +8,14 @@ import React, {
   type ReactNode,
 } from "react";
 
+// Updated Settings interface to only include the fields you want to keep
 export interface Settings {
   theme: "dark";
   interfaceFont: string;
   bodyFont: string;
-  notifications: boolean;
-  soundEffects: boolean;
-  autoSave: boolean;
-  saveInterval: number;
   glowEffects: boolean;
   animations: boolean;
   userName: string;
-  instructions: string;
-  memory: string;
   tone: "dream" | "astrofuck";
   defaultMode: "dream" | "astrofuck";
   ragAutoIngest: boolean;
@@ -32,15 +27,11 @@ const DEFAULTS: Settings = {
   theme: "dark",
   interfaceFont: "Courier New",
   bodyFont: "Courier New",
-  notifications: true,
-  soundEffects: true,
-  autoSave: true,
-  saveInterval: 5,
+  // Removed: notifications, soundEffects, autoSave, saveInterval
   glowEffects: true,
   animations: true,
   userName: "",
-  instructions: "",
-  memory: "",
+  // Removed: instructions, memory
   tone: "dream",
   defaultMode: "dream",
   ragAutoIngest: true,
@@ -71,6 +62,7 @@ function getPrefsHandle(): any | null {
 }
 
 function enforceInvariants(s: Settings): Settings {
+  // We keep 'theme', 'glowEffects', and 'animations' as required invariants
   return { ...s, theme: "dark", glowEffects: true, animations: true };
 }
 
@@ -93,16 +85,44 @@ async function loadFromPrefsSafe(): Promise<Settings | null> {
     if (prefs?.get) {
       const raw = await prefs.get(SETTINGS_KEY, null);
       if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        return raw as Settings;
+        // We cast to any first, then manually pick the properties that are still in Settings
+        const rawSettings = raw as any;
+        const filteredSettings: Partial<Settings> = {
+          theme: rawSettings.theme,
+          interfaceFont: rawSettings.interfaceFont,
+          bodyFont: rawSettings.bodyFont,
+          glowEffects: rawSettings.glowEffects,
+          animations: rawSettings.animations,
+          userName: rawSettings.userName,
+          tone: rawSettings.tone,
+          defaultMode: rawSettings.defaultMode,
+          ragAutoIngest: rawSettings.ragAutoIngest,
+          audience: rawSettings.audience,
+          lastRoute: rawSettings.lastRoute,
+        };
+        return filteredSettings as Settings;
       }
     }
     
     // Fallback to localStorage
     const ls = localStorage.getItem(LOCALSTORAGE_KEY);
     if (ls) {
-      const parsed = JSON.parse(ls);
+      const parsed = JSON.parse(ls) as any;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Settings;
+        const filteredSettings: Partial<Settings> = {
+          theme: parsed.theme,
+          interfaceFont: parsed.interfaceFont,
+          bodyFont: parsed.bodyFont,
+          glowEffects: parsed.glowEffects,
+          animations: parsed.animations,
+          userName: parsed.userName,
+          tone: parsed.tone,
+          defaultMode: parsed.defaultMode,
+          ragAutoIngest: parsed.ragAutoIngest,
+          audience: parsed.audience,
+          lastRoute: parsed.lastRoute,
+        };
+        return filteredSettings as Settings;
       }
     }
     return null;
@@ -155,20 +175,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       
       // Persist to prefs immediately
       persistToPrefsSafe(nextVal).then(() => {
-        // Auto-ingest memory to backend if content exists
-        if (nextVal.memory || nextVal.instructions) {
-          fetch('http://127.0.0.1:8000/ingest-memory', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user: nextVal.userName,
-              memory: nextVal.memory,
-              instructions: nextVal.instructions,
-              audience: nextVal.audience
-            })
-          })
-          .catch(err => console.error('[settings] Ingest failed:', err));
-        }
+        // REMOVED: The logic to fetch('http://127.0.0.1:8000/ingest-memory')
+        // as it relied on 'memory' and 'instructions' fields.
       }).catch(err => {
         console.error("[settings] Persist failed:", err);
       });

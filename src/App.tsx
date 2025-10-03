@@ -94,11 +94,16 @@ const AppContent: React.FC = () => {
     return () => window.removeEventListener("beforeunload", onClose);
   }, []);
 
-  // health check
+  // health check and initial welcome message (REFORGED)
   useEffect(() => {
+    // Only check if threads have been loaded from disk first
     if (!hasLoadedThreads) return;
+    
+    // If we're already ready or in an error state, stop the interval
     if (connectionStatus === "ready" || connectionStatus === "error") return;
+
     let cancelled = false;
+    
     const checkStatus = async () => {
       try {
         let ok = false;
@@ -110,12 +115,17 @@ const AppContent: React.FC = () => {
           ok = response.ok;
         }
         if (cancelled) return;
+
         if (ok) {
           setConnectionStatus("ready");
+          
+          // CRITICAL: Only create the initial welcome thread if the thread list is completely empty.
           if (threadsRef.current.length === 0) {
             const newId = `thread-init-${Date.now()}`;
+            // Use settings.userName directly and format the greeting with markdown.
             const name = (settings.userName || "").trim();
-            const hello = name ? `hello ${name}. ` : "";
+            const hello = name ? `hello **${name}**. ` : "";
+            
             setThreadList([{
               id: newId,
               title: "first encounter",
@@ -133,10 +143,13 @@ const AppContent: React.FC = () => {
         if (!cancelled) setConnectionStatus((s) => (s === "initializing" ? "connecting" : s));
       }
     };
+    
     const id = setInterval(checkStatus, 2000);
     checkStatus();
+    
     return () => { cancelled = true; clearInterval(id); };
-  }, [connectionStatus, currentMode, settings.userName, hasLoadedThreads]);
+  // settings.userName added as a dependency to ensure fresh name is used on load/change
+  }, [connectionStatus, currentMode, settings.userName, hasLoadedThreads]); 
 
   // theme + fonts
   useEffect(() => {
@@ -411,6 +424,7 @@ const handleNewCommand = async (command: string) => {
     void electron?.threads?.save?.(threadsRef.current);
   }
 };
+
 
   // ---------- render ----------
   return (
