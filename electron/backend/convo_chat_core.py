@@ -488,9 +488,12 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     log.info(f"[perf] RAG assemble: {time.time()-t0:.3f}s")
     system_prompt_parts = [p for p in [ get_cfg("prompts.system_core", ""), get_cfg(f"prompts.style_contract_{mode}", ""), get_cfg(f"prompts.mode_tone_inject.{mode}", ""), f"[MODE:{mode.upper()}] Respond strictly in the {mode.upper()} register."] if p]
     final_system_prompt = "\n\n".join(system_prompt_parts); thread_id = _thread_id_of(request)
-    history_all = _thread_history(session, thread_id, int(get_cfg("assembly.history_turns", 8))) # Reduced history for perf
-    history_pairs = filter_history_by_mode(history_all, mode, int(get_cfg("assembly.history_turns", 8)))
-    msgs = build_messages(mode, _cap(final_system_prompt, 2500), history_pairs, user_text, _cap(context, 2200), lang) # Reduced cap for perf
+    
+    # TONE FIX: Restore original prompt depth and history length from v9.24
+    history_all = _thread_history(session, thread_id, int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)))
+    history_pairs = filter_history_by_mode(history_all, mode, int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)))
+    msgs = build_messages(mode, _cap(final_system_prompt, 3500), history_pairs, user_text, _cap(context, 2200), lang)
+    
     log.info(f"[Context] Retrieved context length: {len(context)} chars"); log.info(f"[History] Using {len(history_pairs)} history pairs for this mode."); log.info(f"[Assembly] Total messages for LLM: {len(msgs)}")
     mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
     call_params = _prune_unsupported_params(chat_llm, {
@@ -540,7 +543,7 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     final_text = _strip_emoji_except_glyphs(final_text); final_text = enforce_persona_ending(final_text, mode)
     _append_history(session, thread_id, user_text, final_text, mode, int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))); session["turn"] = int(session.get("turn", 0)) + 1
     save_session(session.get("id")); log.info(f"[Response] Final response length: {len(final_text)} chars"); log.info("-" * 50 + "\n"); yield _sse("", event="done")
-
+    
 # ---------- API ROUTES ----------
 @app.get("/healthz")
 def healthz(): return {"ok": True, "vessels": list(llm_vessels.keys())}
