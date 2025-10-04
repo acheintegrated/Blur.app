@@ -459,7 +459,7 @@ profiles:
   high_quality:
     overrides:
       engines.llama_cpp.default_args:
-        - --ctx-size=16000
+        - --ctx-size=11111
         - --threads=8
       models.qwen3_4b_unified.params:
         temperature: 0.9

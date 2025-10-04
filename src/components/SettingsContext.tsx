@@ -61,9 +61,16 @@ function getPrefsHandle(): any | null {
   return w?.prefs || w?.electron?.prefs || null;
 }
 
+// REFORGE: Trim and stringify userName to ensure it's always clean
 function enforceInvariants(s: Settings): Settings {
-  // We keep 'theme', 'glowEffects', and 'animations' as required invariants
-  return { ...s, theme: "dark", glowEffects: true, animations: true };
+  const clean = (x: unknown) => String(x ?? "").trim();
+  return {
+    ...s,
+    theme: "dark",
+    glowEffects: true,
+    animations: true,
+    userName: clean(s.userName), // ← trim & stringify
+  };
 }
 
 async function persistToPrefsSafe(s: Settings): Promise<void> {
@@ -79,28 +86,28 @@ async function persistToPrefsSafe(s: Settings): Promise<void> {
   }
 }
 
-async function loadFromPrefsSafe(): Promise<Settings | null> {
+async function loadFromPrefsSafe(): Promise<Partial<Settings> | null> {
   const prefs = getPrefsHandle();
   try {
     if (prefs?.get) {
       const raw = await prefs.get(SETTINGS_KEY, null);
       if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        // We cast to any first, then manually pick the properties that are still in Settings
         const rawSettings = raw as any;
+        // REFORGE: Hydrate legacy name fields and filter to current Settings shape
         const filteredSettings: Partial<Settings> = {
           theme: rawSettings.theme,
           interfaceFont: rawSettings.interfaceFont,
           bodyFont: rawSettings.bodyFont,
           glowEffects: rawSettings.glowEffects,
           animations: rawSettings.animations,
-          userName: rawSettings.userName,
+          userName: (rawSettings.userName ?? rawSettings.name ?? rawSettings.user?.name ?? rawSettings.profile?.name ?? "") as string,
           tone: rawSettings.tone,
           defaultMode: rawSettings.defaultMode,
           ragAutoIngest: rawSettings.ragAutoIngest,
           audience: rawSettings.audience,
           lastRoute: rawSettings.lastRoute,
         };
-        return filteredSettings as Settings;
+        return filteredSettings;
       }
     }
     
@@ -109,20 +116,21 @@ async function loadFromPrefsSafe(): Promise<Settings | null> {
     if (ls) {
       const parsed = JSON.parse(ls) as any;
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        // REFORGE: Hydrate legacy name fields and filter to current Settings shape
         const filteredSettings: Partial<Settings> = {
           theme: parsed.theme,
           interfaceFont: parsed.interfaceFont,
           bodyFont: parsed.bodyFont,
           glowEffects: parsed.glowEffects,
           animations: parsed.animations,
-          userName: parsed.userName,
+          userName: (parsed.userName ?? parsed.name ?? parsed.user?.name ?? parsed.profile?.name ?? "") as string,
           tone: parsed.tone,
           defaultMode: parsed.defaultMode,
           ragAutoIngest: parsed.ragAutoIngest,
           audience: parsed.audience,
           lastRoute: parsed.lastRoute,
         };
-        return filteredSettings as Settings;
+        return filteredSettings;
       }
     }
     return null;
@@ -168,16 +176,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  // FIXED updater that awaits disk flush AND sends to backend
   const updateSettings = useCallback(async (patch: Partial<Settings>) => {
     setSettings(prev => {
       const nextVal = enforceInvariants({ ...prev, ...patch });
       
-      // Persist to prefs immediately
-      persistToPrefsSafe(nextVal).then(() => {
-        // REMOVED: The logic to fetch('http://127.0.0.1:8000/ingest-memory')
-        // as it relied on 'memory' and 'instructions' fields.
-      }).catch(err => {
+      persistToPrefsSafe(nextVal).catch(err => {
         console.error("[settings] Persist failed:", err);
       });
       
@@ -204,7 +207,6 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const applyTheme = () => applyThemeStatic();
   const applyFonts = () => applyFontsStatic(settings);
 
-  // Show loading state while initializing
   if (isLoading) {
     return <div>Loading settings...</div>;
   }

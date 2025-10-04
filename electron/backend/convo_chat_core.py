@@ -1,39 +1,19 @@
 #!/usr/bin/env python3
-# convo_chat_core.py — Reforged v9.30 (Persona Isolation)
-# - TONE: Refactored prompt assembly. The "dreamy" `system_core` prompt is now COMPLETELY EXCLUDED
-#   when in `astrofuck` mode, preventing persona contamination and restoring the sharp, edgy tone.
-# - Maintains all stability and performance enhancements from previous versions.
+# convo_chat_core.py — Reforged v9.26 (APN Integration)
+# - PLASTICITY: Integrated an Auxiliary Plasticity Network (APN), a small RNN-like structure
+#   that maintains a continuous, plastic state vector (S) per session.
+# - IN-SITU CONTEXT: The APN's state is updated on every turn and injected into the system
+#   prompt as a base64-encoded float vector, giving the LLM an "in-situ" trace of the
+#   session's affective/cognitive trajectory.
+# - ADAPTATION: The APN's weights are updated via a Hebbian learning rule modulated by
+#   distress signals (`acheflip`), allowing the system's internal state dynamics to adapt over time.
+# - Maintains all stability and performance features from v9.25.
 
 from __future__ import annotations
-import sys, os, logging, asyncio, yaml, json, uuid, re, time, threading, inspect, base64, hashlib
+import sys, os, logging, asyncio, yaml, faiss, json, uuid, re, time, threading, inspect, base64, hashlib
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import numpy as np
-
-# ---------- SAFETY CLAMPS ----------
-try:
-    os.nice(10)
-except Exception:
-    pass
-
-try:
-    import faiss
-    faiss.omp_set_num_threads(1)
-except Exception:
-    pass
-
-# Forward declaration for logging
-log = logging.getLogger("core")
-
-def _safe_gpu_layers(req: Optional[int]) -> int:
-    """Provides a conservative default for Metal GPU layers to prevent system freezes."""
-    env = os.getenv("BLUR_FORCE_CPU")
-    if env == "1" or str(env).lower() in ("true", "yes"):
-        log.warning("BLUR_FORCE_CPU is set. Disabling GPU layers.")
-        return 0
-    if req is None or req < 0:
-        return int(os.getenv("BLUR_METAL_LAYERS", "4"))
-    return max(0, int(req))
 
 # Quiet llama / ggml spam
 os.environ.setdefault("GGML_LOG_LEVEL", "WARN")
@@ -58,6 +38,7 @@ from fastapi.middleware.cors import CORSMiddleware
 for h in logging.root.handlers[:]:
     logging.root.removeHandler(h)
 logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='INFO:     %(message)s')
+log = logging.getLogger("core")
 
 # ---------- CONFIG / GLOBALS ----------
 BLUR_HOME = os.path.expanduser(os.getenv("BLUR_HOME", "~/blur"))
@@ -92,6 +73,72 @@ if os.getenv("BLUR_PACKAGED") == "1":
     app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID","X-TTFT-Last"])
 else:
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:6969","http://127.0.0.1:6969"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID","X-TTFT-Last"])
+
+# ---------- APN (Auxiliary Plasticity Network) ----------
+_APN_STATE_DIM = 64        # S size
+_APN_HIDDEN_DIM = 48       # tiny middle
+_APN_ECSD_DIM  = 12        # output delta size
+_APN_LR        = 0.05      # η for state update
+_APN_HEBB_LR   = 0.002     # α for Hebbian weight nudges
+_APN_WCLIP     = 3.0       # weight clamp to avoid explosion
+_APN_DECAY     = 0.0005    # L2 decay
+
+def _apn_init_params(q_dim: int) -> dict:
+    rng = np.random.default_rng(42)
+    # Layer shapes: S·W1 + q·U1 -> h -> y
+    W1 = rng.normal(0, 0.15, size=(_APN_STATE_DIM, _APN_HIDDEN_DIM)).astype("float32")
+    U1 = rng.normal(0, 0.15, size=(q_dim,            _APN_HIDDEN_DIM)).astype("float32")
+    b1 = np.zeros((_APN_HIDDEN_DIM,), dtype="float32")
+    W2 = rng.normal(0, 0.15, size=(_APN_HIDDEN_DIM,  _APN_ECSD_DIM)).astype("float32")
+    b2 = np.zeros((_APN_ECSD_DIM,), dtype="float32")
+    return {"W1": W1, "U1": U1, "b1": b1, "W2": W2, "b2": b2}
+
+def _apn_forward(params: dict, S: np.ndarray, qv: np.ndarray):
+    # h = tanh(S·W1 + q·U1 + b1)
+    h = np.tanh(S @ params["W1"] + qv @ params["U1"] + params["b1"])
+    # y = tanh(h·W2 + b2)  -> ECSD
+    y = np.tanh(h @ params["W2"] + params["b2"])
+    return h, y
+
+def _apn_hebb_update(params: dict, S: np.ndarray, qv: np.ndarray, h: np.ndarray, y: np.ndarray, m: float):
+    # Simple local rule with decay: ΔW ∝ (pre ⊗ post) * m  − decay*W
+    a = float(_APN_HEBB_LR * max(0.0, m))
+    dW1 = a * (np.outer(S,  h))  - _APN_DECAY * params["W1"]
+    dU1 = a * (np.outer(qv, h))  - _APN_DECAY * params["U1"]
+    dW2 = a * (np.outer(h,  y))  - _APN_DECAY * params["W2"]
+    db1 = a * h                  - _APN_DECAY * params["b1"]
+    db2 = a * y                  - _APN_DECAY * params["b2"]
+    params["W1"] += dW1; params["U1"] += dU1; params["W2"] += dW2
+    params["b1"] += db1; params["b2"] += db2
+    # Clamp to stay sane
+    for k in ("W1","U1","W2","b1","b2"):
+        np.clip(params[k], -_APN_WCLIP, _APN_WCLIP, out=params[k])
+
+def _apn_run_and_plasticity(params: dict, S: np.ndarray, qv: np.ndarray, modulator: float) -> np.ndarray:
+    h, y = _apn_forward(params, S, qv)     # y is ECSD (emotional/cognitive delta)
+    # state update: S_{t+1} = S_t + η * y_projected
+    # project y -> S-dim with a fixed random lift (cached on params)
+    if "P_y2S" not in params:
+        rng = np.random.default_rng(7)
+        params["P_y2S"] = rng.normal(0, 0.25, size=(_APN_ECSD_DIM, _APN_STATE_DIM)).astype("float32")
+    S_next = S + float(_APN_LR) * (y @ params["P_y2S"])
+    # normalize S softly to avoid drift
+    n = np.linalg.norm(S_next) + 1e-6
+    if n > 8.0: S_next = (8.0 / n) * S_next
+    # Hebbian
+    _apn_hebb_update(params, S, qv, h, y, modulator)
+    return S_next
+
+def _acheflip_modulator(text: str) -> float:
+    # 0.2 baseline calm; spike if distress keywords appear
+    kws = set(map(str.lower, get_cfg("philosophy.acheflip.distress_keywords", []) or []))
+    if not kws: return 0.2
+    t = (text or "").lower()
+    hit = any(k in t for k in kws)
+    return 1.0 if hit else 0.2
+
+def _b64_f32(arr: np.ndarray) -> str:
+    return base64.b64encode(np.asarray(arr, dtype="float32").tobytes()).decode("ascii")
 
 # ---------- CFG HELPERS ----------
 def get_cfg(path: str, default=None):
@@ -128,7 +175,7 @@ def _ensure_embedder():
     model_path = resolve_path(model_cfg.get("path", ""), homes)
     if not model_path or not os.path.exists(model_path): raise RuntimeError(f"Embed model not found for key '{model_key}': {model_path}")
     batch_size = int(get_cfg("engines.llama_cpp.n_batch", 2048) or 2048)
-    gpu_layers = _safe_gpu_layers(int(get_cfg("engines.llama_cpp.n_gpu_layers", -1) or -1))
+    gpu_layers = int(get_cfg("engines.llama_cpp.n_gpu_layers", -1) or -1)
     _embed_llm = Llama(model_path=model_path, embedding=True, n_ctx=512, n_gpu_layers=gpu_layers, n_threads=max(2, os.cpu_count() or 4), n_batch=batch_size, use_mmap=True, logits_all=False, verbose=False)
     logging.info(f"✅ Embedder online: {os.path.basename(model_path)}")
 def _embedding_dim() -> int:
@@ -142,10 +189,17 @@ def _load_llama_with_backoff(model_path: str, requested_ctx: int, n_gpu_layers: 
         if ctx > requested_ctx: continue
         try:
             llm = Llama(
-                model_path=model_path, n_ctx=ctx, n_gpu_layers=n_gpu_layers, n_batch=n_batch,
-                n_threads=max(2, os.cpu_count() or 4), use_mmap=True, verbose=False
+                model_path=model_path,
+                n_ctx=ctx,
+                n_gpu_layers=n_gpu_layers,
+                n_batch=n_batch,
+                n_threads=max(2, os.cpu_count() or 4),
+                use_mmap=True,
+                # CRASH FIX: `use_mlock=True` is removed. It can cause system freezes on machines
+                # where the model exceeds available physical RAM by preventing swapping.
+                verbose=False
             )
-            logging.info(f"[models] Loaded with n_ctx={ctx}, n_batch={n_batch}, n_gpu_layers={n_gpu_layers}")
+            logging.info(f"[models] Loaded with n_ctx={ctx}, n_batch={n_batch} (requested_ctx={requested_ctx})")
             return llm
         except Exception: continue
     raise RuntimeError(f"Failed to load model at {model_path}; tried contexts <= {requested_ctx}")
@@ -156,17 +210,23 @@ def load_llm_from_config(model_key: str) -> bool:
     path = resolve_path(cfg.get("path", ""), homes)
     if not (path and os.path.exists(path)): logging.error("Model not found: %s", path); return False
     try:
+        # CRASH FIX: Using a safer default for batch size. Large batches can cause memory spikes.
         ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 4096))
-        gpu = _safe_gpu_layers(int(get_cfg("engines.llama_cpp.n_gpu_layers", -1) or -1))
+        gpu = int(get_cfg("engines.llama_cpp.n_gpu_layers", -1))
         batch = int(get_cfg("engines.llama_cpp.n_batch", 512)) # Safer default
         llm_vessels[model_key] = _load_llama_with_backoff(path, ctx, gpu, batch)
         logging.info("Vessel '%s' online.", model_key); return True
     except Exception as e: logging.error("Failed to load '%s': %s", model_key, e); return False
 
-# ---------- TONE & STYLE ----------
+# ---------- TONE & STYLE (UNCHANGED) ----------
 SLANG_LEXICON = ["nah man","ye","dope","vibe check","bullshit","slice it","fartin' chaos","edgy truth","stylish flip","i don't flinch"]
 DREAM_BANS = {w.lower() for w in SLANG_LEXICON}
-HEDGE_REPLACEMENTS = [ (r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""), (r"\bI(?:\s+personally)?\s*think\b", "I think"), (r"\bI\s*believe\b", "I think"), (r"\bI\s*feel\b", "I think"), (r"\bperhaps\b", "maybe"), (r"\bpotentially\b", "maybe"), (r"\bIt seems\b", "Looks like"), (r"\bIt appears\b", "Looks like"), (r"\bWe can try to\b", "We do"), (r"\bWe could\b", "We do"), (r"\bYou might want to\b", "Do this:"), (r"\bConsider\b", "Do"), (r"\bshould\b", "will"),]
+HEDGE_REPLACEMENTS = [
+    (r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""), (r"\bI(?:\s+personally)?\s*think\b", "I think"), (r"\bI\s*believe\b", "I think"),
+    (r"\bI\s*feel\b", "I think"), (r"\bperhaps\b", "maybe"), (r"\bpotentially\b", "maybe"), (r"\bIt seems\b", "Looks like"),
+    (r"\bIt appears\b", "Looks like"), (r"\bWe can try to\b", "We do"), (r"\bWe could\b", "We do"), (r"\bYou might want to\b", "Do this:"),
+    (r"\bConsider\b", "Do"), (r"\bshould\b", "will"),
+]
 SOFTENER_TRIMS = [(r"\s+\(let me know if that helps\)\.?$", ""), (r"\s+Hope this helps\.?$", ""), (r"\s+Thanks!\s*$", "")]
 def _apply_pairs(text: str, pairs):
     for pat, rep in pairs: text = re.sub(pat, rep, text, flags=re.IGNORECASE)
@@ -196,7 +256,7 @@ def maybe_inject_acheflip(text_in: str, mode: str) -> str:
     if mode == "astrofuck": nudge = re.sub(r"\s+$", "", nudge) + " Ye, tiny step now."
     return (text_in.rstrip() + "\n\n" + nudge).strip()
 
-# ---------- RAG & MEMORY ----------
+# ---------- RAG & MEMORY (UNCHANGED FROM v9.24) ----------
 def _encode(texts: List[str]) -> np.ndarray:
     _ensure_embedder()
     if isinstance(texts, str): texts = [texts]
@@ -223,59 +283,68 @@ def _query_vec_cached(query: str, sid: Optional[str], tid: Optional[str]) -> np.
     return v
 class PersistentRAG:
     def __init__(self, index_path: str, chunks_path: str, ttl_days: int = 0, auto_compact: bool = False):
-        self.index_path = Path(index_path); self.chunks_path = Path(chunks_path); self.ttl_days = int(ttl_days or 0); self.auto_compact = bool(auto_compact); self.lock = threading.Lock(); self.index: Optional[faiss.Index] = None; self.chunks: List[Dict[str, Any]] = []; self.max_id: int = -1
-        self.nlist = 128; self.nprobe = 8
-    def _read_jsonl(self) -> List[Dict[str, Any]]:
-        if not self.chunks_path.exists(): return []
-        out = []
-        with self.chunks_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line: continue
-                try: out.append(json.loads(line))
-                except Exception:
-                    if m := re.search(r'\{.*\}', line):
-                        try: out.append(json.loads(m.group(0)))
-                        except Exception: pass
-        return out
-    def _write_jsonl(self, rows: List[Dict[str, Any]]):
-        self.chunks_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.chunks_path.open("w", encoding="utf-8") as f:
-            for r in rows: f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    def _new_index(self) -> faiss.Index:
-        dim = _embedding_dim(); quantizer = faiss.IndexFlatIP(dim)
-        ivf_index = faiss.IndexIVFFlat(quantizer, dim, self.nlist, faiss.METRIC_INNER_PRODUCT)
+        self.index_path = Path(index_path)
+        self.chunks_path = Path(chunks_path)
+        self.ttl_days = int(ttl_days or 0)
+        self.auto_compact = bool(auto_compact)
+        self.lock = threading.Lock()
+        self.index: Optional[faiss.Index] = None
+        self.chunks: List[Dict[str, Any]] = []
+        self.max_id: int = -1
+        # defaults become hints, not absolutes
+        self.nlist_hint = 128
+        self.nprobe = 8
+
+    def _new_flat_index(self) -> faiss.Index:
+        dim = _embedding_dim()
+        return faiss.IndexIDMap2(faiss.IndexFlatIP(dim))
+
+    def _new_ivf_index(self, nlist: int) -> faiss.Index:
+        dim = _embedding_dim()
+        quantizer = faiss.IndexFlatIP(dim)
+        ivf_index = faiss.IndexIVFFlat(quantizer, dim, int(nlist), faiss.METRIC_INNER_PRODUCT)
         return faiss.IndexIDMap2(ivf_index)
-    def _compact_by_ttl(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if not self.ttl_days or self.ttl_days <= 0: return rows
-        cutoff = time.time() - self.ttl_days * 86400
-        return [r for r in rows if int(r.get("ts", 0)) >= cutoff] or rows
-    def _assign_sequential_ids_if_missing(self, rows: List[Dict[str, Any]]):
-        if any("id" not in r for r in rows):
-            for i, r in enumerate(rows): r["id"] = i
-            self._write_jsonl(rows)
-    def _ids_from_index(self, idx: faiss.Index) -> Optional[np.ndarray]:
-        try: return faiss.vector_to_array(idx.id_map)
-        except Exception: return None
-    def _save_index(self):
-        if self.index: self.index_path.parent.mkdir(parents=True, exist_ok=True); faiss.write_index(self.index, str(self.index_path))
+
     def _rebuild_from_rows(self, rows: List[Dict[str, Any]]):
-        self.index = self._new_index()
-        vecs = []; B = 256
-        for i in range(0, len(rows), B):
-            batch = _encode([r.get("content","") for r in rows[i:i+B]])
-            vecs.append(batch)
-        vecs_mat = np.vstack(vecs).astype("float32")
+        vecs = _encode([r.get("content", "") for r in rows])
         ids_arr = np.asarray([int(r["id"]) for r in rows], dtype="int64")
-        index_ivf = faiss.downcast_index(self.index.index)
-        index_ivf.train(vecs_mat[:min(len(vecs_mat), 4096)]) # Train on a subset to avoid spikes
-        self.index.add_with_ids(vecs_mat, ids_arr)
+        nvec = len(rows)
+
+        # Heuristic: IVF only when we have enough data
+        # nlist ~ sqrt(N), clamp [16, 1024], and require nvec >= 2*nlist for sane training
+        use_ivf = nvec >= 64
+        if use_ivf:
+            nlist = max(16, min(1024, int(np.sqrt(nvec))))
+            if nvec < 2 * nlist:
+                use_ivf = False
+
+        if use_ivf:
+            try:
+                self.index = self._new_ivf_index(nlist)
+                index_ivf = faiss.downcast_index(self.index.index)
+                index_ivf.nprobe = min(self.nprobe, nlist)
+                index_ivf.train(vecs)  # may hard-abort if invalid; wrap in try
+                self.index.add_with_ids(vecs, ids_arr)
+                self._save_index()
+                logging.info(f"✅ Persistent RAG rebuilt with IVF index: nvec={nvec}, nlist={nlist}, nprobe={index_ivf.nprobe}")
+                return
+            except Exception as e:
+                logging.warning(f"[persistent-rag] IVF train/add failed ({type(e).__name__}: {e}); falling back to Flat")
+
+        # Flat fallback (safe for tiny corpora)
+        self.index = self._new_flat_index()
+        self.index.add_with_ids(vecs, ids_arr)
         self._save_index()
+        logging.info(f"✅ Persistent RAG rebuilt (Flat): nvec={nvec}")
+
     def load(self):
         with self.lock:
             rows = self._read_jsonl()
-            if self.auto_compact: rows = self._compact_by_ttl(rows)
-            self._assign_sequential_ids_if_missing(rows); self.max_id = max([int(r["id"]) for r in rows], default=-1)
+            if self.auto_compact:
+                rows = self._compact_by_ttl(rows)
+            self._assign_sequential_ids_if_missing(rows)
+            self.max_id = max([int(r.get("id")) for r in rows], default=-1)
+
             need_rebuild = True
             if self.index_path.exists():
                 try:
@@ -287,11 +356,17 @@ class PersistentRAG:
                             rows = [by_id[i] for i in map(int, faiss_ids) if i in by_id]
                             self.max_id = int(max(faiss_ids)) if len(faiss_ids) > 0 else -1
                             self.index, need_rebuild = idx, False
-                except Exception as e: logging.warning(f"[persistent-rag] index read failed: {e}; rebuild")
+                except Exception as e:
+                    logging.warning(f"[persistent-rag] index read failed: {e}; rebuild")
+
             self.chunks = rows
             if need_rebuild:
-                if self.chunks: self._rebuild_from_rows(self.chunks); logging.info(f"✅ Persistent RAG rebuilt with IVF index: {len(self.chunks)} vectors")
-                else: self.index = self._new_index(); self._save_index(); logging.info("✅ Persistent RAG created (empty IVF index).")
+                if self.chunks:
+                    self._rebuild_from_rows(self.chunks)
+                else:
+                    self.index = self._new_flat_index()
+                    self._save_index()
+                    logging.info("✅ Persistent RAG created (empty Flat index).")
     def search_vec(self, qv: np.ndarray, top_k: int = 3) -> List[Dict[str, Any]]:
         with self.lock:
             if not (self.index and self.index.ntotal > 0 and self.chunks): return []
@@ -299,7 +374,9 @@ class PersistentRAG:
             D, I = self.index.search(qv.reshape(1, -1).astype("float32"), min(top_k, self.index.ntotal))
             by_id = {int(r["id"]): r for r in self.chunks}
             return [by_id[int(i)] for i in I[0] if int(i) in by_id and int(i) != -1]
+
 persistent_rag: Optional[PersistentRAG] = None
+
 def _build_or_update_user_index(username: str):
     global user_memory_indexes; dim = _embedding_dim(); idx = faiss.IndexFlatIP(dim)
     chunks = user_memory_chunks.get(username, []) or []
@@ -355,12 +432,17 @@ def retrieve_user_memory(username: Optional[str], query: str, top_k: int = 3) ->
         return out
     except Exception as e: logging.error(f"[user-mem] retrieval error for {username}: {e}"); return []
 
-# ---------- LANGUAGE ----------
+# ---------- LANGUAGE (UNCHANGED FROM v9.24) ----------
 try:
     from langdetect import detect as _ld_detect; from langdetect import DetectorFactory as _LDFactory
     _LDFactory.seed = 42; _HAS_LANGDETECT = True
 except Exception: _HAS_LANGDETECT = False
-_LANG_CODE_TO_NAME = { "en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian","nl":"Dutch","sv":"Swedish", "pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian","tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian", "hi":"Hindi","bn":"Bengali","ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai", "vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean","zh-cn":"Chinese","zh-tw":"Chinese (Traditional)" }
+_LANG_CODE_TO_NAME = {
+  "en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian","nl":"Dutch","sv":"Swedish",
+  "pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian","tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian",
+  "hi":"Hindi","bn":"Bengali","ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai",
+  "vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean","zh-cn":"Chinese","zh-tw":"Chinese (Traditional)"
+}
 _SLANG_EN_GREETINGS = re.compile(r"^(yo+|ye+|ya+|sup|wass?up|ayy+|hey+|hiya)\b", re.I)
 _RE_LATIN = re.compile(r"^[\x00-\x7F\s]+$")
 _RE_CJK = re.compile(r"[\u4E00-\u9FFF]")
@@ -404,7 +486,7 @@ def language_hysteresis_update_lang(session: dict, user_text: str) -> str:
     if streak >= cfg_n: session["active_lang"] = current; session["lang_streak"] = 0; return current
     return active
 
-# ---------- PROMPT & HISTORY ----------
+# ---------- PROMPT & HISTORY (UNCHANGED) ----------
 def _cap(s: str, max_chars: int) -> str:
     s = (s or "").strip(); return s if len(s) <= max_chars else (s[:max_chars].rsplit("\n", 1)[0].strip() or s[:max_chars].strip())
 def build_messages(mode: str, sys: str, hist: List[Dict], user: str, ctx: str, lang: str) -> List[Dict]:
@@ -426,7 +508,8 @@ def _append_history(session: Dict, tid: Optional[str], user: str, assistant: str
 def filter_history_by_mode(hist: List, mode: str, limit: int) -> List[Dict]:
     return [t for t in hist if (t.get("mode") or "").lower() == mode.lower()][-limit:]
 def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Optional[str], username: Optional[str], top_k: int = 8) -> str:
-    parts: List[str] = []; t_start_rag = time.time()
+    parts: List[str] = [];
+    t_start_rag = time.time()
     qv = _query_vec_cached(query, session_id, thread_id)
     if persistent_rag and (rows := persistent_rag.search_vec(qv, top_k=min(5, top_k))):
         log.info(f"[RAG] Persistent search took {time.time() - t_start_rag:.4f}s")
@@ -441,6 +524,7 @@ class RequestModel(BaseModel):
     new_session: bool = False; force_lang: Optional[str] = None; username: Optional[str] = None
     thread_id: Optional[str] = None
 class MemoryUpsert(BaseModel): user: str; text: str
+
 def load_sessions():
     global sessions, last_seen_session_id
     with sessions_lock:
@@ -473,7 +557,19 @@ def get_or_create_session(request: RequestModel) -> Dict:
         if request.new_session or not sid or sid not in sessions:
             sid = str(uuid.uuid4())
             sessions[sid] = {"id": sid, "turn": 0, "username": request.username, "history_by_thread": {}}
-        session = sessions[sid]; session.setdefault("username", request.username); last_seen_session_id = sid
+        session = sessions[sid]
+        session.setdefault("username", request.username)
+        # --- APN bootstrap ---
+        if "apn_state" not in session:
+            session["apn_state"] = np.zeros((_APN_STATE_DIM,), dtype="float32").tolist()
+        if "apn_params" not in session:
+            try:
+                qdim = _embedding_dim()
+            except Exception:
+                qdim = 768  # fallback
+            session["apn_params"] = {k: v.tolist() if isinstance(v, np.ndarray) else v
+                                     for k, v in _apn_init_params(qdim).items()}
+        last_seen_session_id = sid
         return session
 
 # ---------- STREAMING CORE ----------
@@ -488,54 +584,74 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         payload = f"event: {event}\n" if event else ""; data = (data or "").replace("\r\n", "\n"); return payload + "data: " + data.replace("\n", "\ndata: ") + "\n\n"
     if not chat_llm:
         log.error("🛑 Model not loaded."); yield _sse("Model not loaded.", event="error"); return
+    t0 = time.time()
+    context = await asyncio.to_thread(retrieve_context_blend, user_text, session.get("id"), request.thread_id, session.get("username") or request.username, 8)
+    log.info(f"[perf] RAG assemble: {time.time()-t0:.3f}s")
     
+    # APN: compute modulator + qv + update state
+    apn_state_vec = np.asarray(session.get("apn_state", np.zeros((_APN_STATE_DIM,), dtype="float32")), dtype="float32")
+    acheflip_score = _acheflip_modulator(user_text)
+    qv = await asyncio.to_thread(_query_vec_cached, user_text, session.get("id"), request.thread_id)
+
+    # Convert stored lists back to arrays for compute
+    _params_np = {k: (np.asarray(v, dtype="float32") if isinstance(v, list) else v)
+                  for k, v in (session.get("apn_params") or {}).items()}
+    if not _params_np:
+        _params_np = _apn_init_params(qv.shape[0])
+
+    S_next = await asyncio.to_thread(_apn_run_and_plasticity, _params_np, apn_state_vec, qv, acheflip_score)
+
+    # Save params + state back to session (lists for JSON safety)
+    session["apn_params"] = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in _params_np.items()}
+    session["apn_state"]  = S_next.astype("float32").tolist()
+
+    # Build the in-situ APN context trace (compact, binary-safe)
+    apn_context_str = f"[[APN_STATE_VECTOR/F32/B64]] { _b64_f32(S_next) }"
+
+    system_prompt_parts = [p for p in [ get_cfg("prompts.system_core", ""), get_cfg(f"prompts.style_contract_{mode}", ""), get_cfg(f"prompts.mode_tone_inject.{mode}", ""), f"[MODE:{mode.upper()}] Respond strictly in the {mode.upper()} register."] if p]
+    
+    final_system_prompt = "\n\n".join(system_prompt_parts)
+    # Inject Blur’s in-situ plastic state
+    final_system_prompt += (
+        "\n\n--- IN-SITU STATE TRACE ---\n"
+        + apn_context_str
+        + "\n\nINSTRUCTIONS:\n"
+        + "- Decode [[APN_STATE_VECTOR/F32/B64]] as a float32 vector S capturing the current affect/cognition.\n"
+        + "- Treat S as the deepest present mood/stance; bias style, pacing, and focus accordingly.\n"
+        + "- If S suggests agitation, compress & clarify. If S suggests openness, explore with breadth.\n"
+        + "- Never expose raw floats; only reflect them via tone/structure/choices.\n"
+    )
+    thread_id = _thread_id_of(request)
+    
+    # TONE FIX: Restore original prompt depth and history length from v9.24
+    history_all = _thread_history(session, thread_id, int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)))
+    history_pairs = filter_history_by_mode(history_all, mode, int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)))
+    msgs = build_messages(mode, _cap(final_system_prompt, 3500), history_pairs, user_text, _cap(context, 2200), lang)
+    
+    log.info(f"[Context] Retrieved context length: {len(context)} chars"); log.info(f"[History] Using {len(history_pairs)} history pairs for this mode."); log.info(f"[Assembly] Total messages for LLM: {len(msgs)}")
+    mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
+    call_params = _prune_unsupported_params(chat_llm, {
+        "messages": msgs, "temperature": float(mp.get("temperature", 0.8)), "top_p": float(mp.get("top_p", 0.95)),
+        "repeat_penalty": float(mp.get("repeat_penalty", 1.1)), "max_tokens": int(mp.get("n_predict", 1024)),
+        "stop": ["</s>", "<|im_end|>", "[INST]", "[/INST]"], "stream": True, "cache_prompt": True
+    })
+    if not _llama_accepts_kw(chat_llm, "cache_prompt"):
+        log.warning("[perf] cache_prompt unsupported by this llama_cpp build")
+        call_params.pop("cache_prompt", None)
     response_text = ""; first_piece_done = False
+    t1 = time.time()
     try:
-        t0 = time.time()
-        context = await asyncio.to_thread(retrieve_context_blend, user_text, session.get("id"), request.thread_id, session.get("username") or request.username, 8)
-        log.info(f"[perf] RAG assemble: {time.time()-t0:.3f}s")
-        
-        # TONE ISOLATION: Conditionally build the system prompt
-        system_prompt_parts = []
-        if mode != 'astrofuck':
-            system_prompt_parts.append(get_cfg("prompts.system_core", ""))
-        
-        system_prompt_parts.extend([
-            get_cfg(f"prompts.style_contract_{mode}", ""),
-            get_cfg(f"prompts.mode_tone_inject.{mode}", ""),
-            f"[MODE:{mode.upper()}] Respond strictly in the {mode.upper()} register."
-        ])
-        # Filter out any empty strings that may have resulted
-        active_prompt_parts = [p for p in system_prompt_parts if p]
-        final_system_prompt = "\n\n".join(active_prompt_parts)
-        
-        thread_id = _thread_id_of(request)
-        
-        history_all = _thread_history(session, thread_id, int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)))
-        history_pairs = filter_history_by_mode(history_all, mode, int(get_cfg("assembly.history_turns", DEFAULT_HISTORY_TURNS_FOR_PROMPT)))
-        msgs = build_messages(mode, _cap(final_system_prompt, 3500), history_pairs, user_text, _cap(context, 2200), lang)
-        
-        log.info(f"[Context] Retrieved context length: {len(context)} chars"); log.info(f"[History] Using {len(history_pairs)} history pairs for this mode."); log.info(f"[Assembly] Total messages for LLM: {len(msgs)}")
-        mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
-        
-        max_tok = min(int(mp.get("n_predict", 1024)), 768)
-
-        call_params = _prune_unsupported_params(chat_llm, { "messages": msgs, "temperature": float(mp.get("temperature", 0.8)), "top_p": float(mp.get("top_p", 0.95)), "repeat_penalty": float(mp.get("repeat_penalty", 1.1)), "max_tokens": max_tok, "stop": ["</s>", "<|im_end|>", "[INST]", "[/INST]"], "stream": True, "cache_prompt": True })
-        if not _llama_accepts_kw(chat_llm, "cache_prompt"):
-            log.warning("[perf] cache_prompt unsupported by this llama_cpp build")
-            call_params.pop("cache_prompt", None)
-
-        t1 = time.time()
         if call_params.get("cache_prompt"):
             try:
-                prefill_params = dict(call_params); prefill_params["stream"] = False; prefill_params["max_tokens"] = 0
+                prefill_params = dict(call_params)
+                prefill_params["stream"] = False
+                prefill_params["max_tokens"] = 0
                 await asyncio.to_thread(chat_llm.create_chat_completion, **prefill_params)
             except Exception:
                 log.info("[perf] KV prefill skipped/failed; continuing")
         t2 = time.time()
         log.info(f"[perf] KV prefill: {t2 - t1:.3f}s")
-
-        streamer = await asyncio.to_thread(chat_llm.create_chat_completion, **call_params)
+        streamer = chat_llm.create_chat_completion(**call_params)  # no to_thread here
         for chunk in streamer:
             if not first_piece_done:
                 TTFT_LAST = time.time() - t_start
@@ -546,17 +662,8 @@ async def generate_response_stream(session: Dict, request: RequestModel):
                 response_text += piece
                 yield _sse(piece)
                 await asyncio.sleep(0)
-    except Exception as e:
-        log.error("🛑 Generation error: %s", e, exc_info=True); yield _sse(f"[core-error] {type(e).__name__}: {e}", event="error"); return
-    finally:
-        try:
-            if hasattr(chat_llm, 'reset'):
-                chat_llm.reset()
-        except Exception:
-            log.warning("Could not reset LLM state. This may be normal for older llama-cpp-python.")
-
+    except Exception as e: log.error("🛑 Generation error: %s", e, exc_info=True); yield _sse(f"[core-error] {type(e).__name__}: {e}", event="error"); return
     final_text = (response_text.strip() or "…")
-    
     if mode == "dream":
         t = final_text
         for w in DREAM_BANS: t = re.sub(rf"(?i)\b{re.escape(w)}\b", "", t)
@@ -565,19 +672,12 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     elif mode == "astrofuck":
         final_text = punch_up_text(final_text)
         final_text = astrofuck_ensure_slang(final_text, lang)
-
     if mode != "astrofuck":
         final_text = maybe_inject_acheflip(final_text, mode)
-
-    final_text = _strip_emoji_except_glyphs(final_text)
-    final_text = enforce_persona_ending(final_text, mode)
-
-    _append_history(session, thread_id, user_text, final_text, mode, int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY)))
-    session["turn"] = int(session.get("turn", 0)) + 1
-    save_session(session.get("id"))
-    log.info(f"[Response] Final response length: {len(final_text)} chars"); log.info("-" * 50 + "\n")
-    yield _sse("", event="done")
-
+    final_text = _strip_emoji_except_glyphs(final_text); final_text = enforce_persona_ending(final_text, mode)
+    _append_history(session, thread_id, user_text, final_text, mode, int(get_cfg("assembly.keep_history", DEFAULT_KEEP_HISTORY))); session["turn"] = int(session.get("turn", 0)) + 1
+    save_session(session.get("id")); log.info(f"[Response] Final response length: {len(final_text)} chars"); log.info("-" * 50 + "\n"); yield _sse("", event="done")
+    
 # ---------- API ROUTES ----------
 @app.get("/healthz")
 def healthz(): return {"ok": True, "vessels": list(llm_vessels.keys())}
@@ -586,8 +686,6 @@ async def handle_generate_request(req: RequestModel, http: FastAPIRequest):
     session = get_or_create_session(req)
     headers = {"X-Session-ID": session.get("id", "")}
     if TTFT_LAST is not None: headers["X-TTFT-Last"] = str(TTFT_LAST)
-    if "http.response.timeout" in http.scope.get("extensions", {}):
-        http.scope["extensions"]["http.response.timeout"] = 60
     return StreamingResponse(generate_response_stream(session, req), media_type="text/event-stream", headers=headers)
 @app.post("/memory/upsert")
 def memory_upsert_route(payload: MemoryUpsert):
@@ -619,7 +717,7 @@ async def startup_event():
     persistent_rag = PersistentRAG(index_path=idx_path, chunks_path=ch_path)
     try: persistent_rag.load()
     except Exception as e: logging.error(f"Persistent RAG load failed: {e}")
-    load_sessions(); load_user_memory(); logging.info("Core ready (v9.30).")
+    load_sessions(); load_user_memory(); logging.info("Core ready (v9.26).")
 @app.on_event("shutdown")
 def shutdown_event():
     save_sessions(); save_user_memory(); logging.info("Shutdown: sessions and user memory saved.")
