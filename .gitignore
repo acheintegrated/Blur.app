@@ -24,6 +24,7 @@ resources/models/
 resources/blur_env-darwin-arm64/
 resources/blur_env-darwin-x64/
 resources/core/.venv/
+resources/sessions/
 
 # Llama Bin
 bin/
