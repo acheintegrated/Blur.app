@@ -1,7 +1,9 @@
-// electron/main.mjs — REFORGED v11.1 (Performance Optimizations)
-// - FIX: Prevents heavy 'models' directory from being re-copied on simple config version bumps.
-// - OPTIMIZE: Disables Spotlight indexing on the models directory to reduce system lag.
-// - OPTIMIZE: Clamps additional Python math backends (OpenBLAS, GOTO, MKL) to a single thread.
+// electron/main.mjs — REFORGED v11.2 (Launch & Resource Optimizations)
+// - PERF: Enabled GPU acceleration by default in production.
+// - PERF: Relaxed Python math library thread limits to improve performance.
+// - FIX: Correctly sets BLUR_HOME to the in-repo 'resources' directory for development.
+// - FIX: Prefers using the in-bundle resources in packaged apps to eliminate slow first-run file copying and reduce I/O.
+// - FIX: Improved bundle-finding logic to be case-insensitive ('Blur' vs 'blur').
 import { app, BrowserWindow, shell, ipcMain, globalShortcut, powerMonitor } from "electron";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
@@ -20,7 +22,9 @@ const __dirname = dirname(__filename);
 /* ============================================================================
    FLAGS
 ============================================================================ */
-app.disableHardwareAcceleration();
+// ✅ PATCH A-1: Use GPU in prod; only disable for debugging.
+if (process.env.BLUR_DISABLE_GPU === "1") app.disableHardwareAcceleration();
+
 app.commandLine.appendSwitch("allow-running-insecure-content");
 app.commandLine.appendSwitch("disable-features", "OutOfBlinkCors");
 
@@ -80,12 +84,16 @@ const log = (...args) => {
 ============================================================================ */
 function homeBlurPath() { return resolve(os.homedir(), "blur"); }
 function packagedBlurPath() { return join(app.getPath("appData"), APP_NAME, "blur"); }
+
+// ✅ PATCH B-2: Fix the Resources/Blur vs resources/blur mismatch
 function getBundledBlurRoot() {
   const res = process.resourcesPath || join(__dirname, "..");
-  const cand = join(res, "blur");
-  if (existsSync(cand)) return cand;
-  const cand2 = join(res, "resources");
-  return existsSync(cand2) ? cand2 : null;
+  const cands = [
+    join(res, "Blur"),     // afterPack puts payload here
+    join(res, "blur"),     // legacy
+  ];
+  for (const c of cands) { if (existsSync(c)) return c; }
+  return null;
 }
 function statSafe(p) { try { return statSync(p); } catch { return null; } }
 function cpRecursive(src, dst) {
@@ -115,36 +123,45 @@ function readYamlVersion(yamlText = "") {
 }
 
 async function ensureBlurHomeAndUnpack() {
+  // ✅ PATCH B-1: Dev BLUR_HOME should point to your repo’s ./resources
   if (!app.isPackaged) {
-    const devResourcesPath = resolve(homeBlurPath(), "resources");
-    if (existsSync(devResourcesPath)) {
-        process.env.BLUR_HOME = devResourcesPath;
-        log(`[dev] BLUR_HOME set to project resources: ${devResourcesPath}`);
+    const devRoot = resolve(app.getAppPath(), "resources");
+    if (existsSync(devRoot)) {
+      process.env.BLUR_HOME = devRoot;
+      log(`[dev] BLUR_HOME = ${devRoot}`);
+    } else {
+      log("[dev] ./resources missing; fallback to ~/blur");
     }
   }
 
   const envSet = !!process.env.BLUR_HOME;
   const homePath = homeBlurPath();
   const homeExists = existsSync(homePath);
-  const bundledRoot = getBundledBlurRoot();
 
+  // ✅ PATCH B-2: Set BLUR_HOME correctly for packaged apps
   if (!envSet) {
-    process.env.BLUR_HOME = homeExists ? homePath : (app.isPackaged ? packagedBlurPath() : homePath);
+    const bundledRoot = getBundledBlurRoot();
+    if (app.isPackaged && bundledRoot) {
+      process.env.BLUR_HOME = bundledRoot;
+    } else {
+      process.env.BLUR_HOME = homeExists ? homePath : (app.isPackaged ? packagedBlurPath() : homePath);
+    }
   }
   const BLUR_HOME = process.env.BLUR_HOME;
   mkdirSync(BLUR_HOME, { recursive: true });
 
   log(`[resources] Using BLUR_HOME: ${BLUR_HOME}`);
   
-  // ✅ OPTIMIZE: Kill Spotlight indexing on the models directory.
   const modelsPath = join(process.env.BLUR_HOME, "models");
   try {
-    mkdirSync(modelsPath, { recursive: true }); // Ensure it exists
+    mkdirSync(modelsPath, { recursive: true });
     writeFileSync(join(modelsPath, ".metadata_never_index"), "");
     log("[resources] Disabled Spotlight on models directory.");
   } catch {}
 
-  if (app.isPackaged && bundledRoot && BLUR_HOME !== homePath) {
+  const bundledRoot = getBundledBlurRoot(); // Re-get for the check below
+  // ✅ PATCH B-3: Gate the copy logic
+  if (app.isPackaged && bundledRoot && BLUR_HOME !== bundledRoot && BLUR_HOME !== homePath) {
     const srcCfg = join(bundledRoot, "config.yaml");
     const dstCfg = join(BLUR_HOME, "config.yaml");
 
@@ -160,36 +177,49 @@ async function ensureBlurHomeAndUnpack() {
       log("[resources] version compare failed:", String(e?.message || e));
     }
     
-    // ✅ FIX: Copy lightweight files if needed, but not heavy models.
     if (needsCopy) {
-      const toCopyAlways = ["config.yaml", "acheflip.yaml", join("core","ouinet","blurchive","ecosystem"), join("core","bin")];
-      for (const rel of toCopyAlways) {
+      const filesCopyIfMissing = ["config.yaml", "acheflip.yaml"];
+      // ✅ PATCH B-5: On version bump, replace core/ wholesale
+      const dirsReplaceAlways = [ "core" ];
+
+      for (const rel of filesCopyIfMissing) {
         const src = join(bundledRoot, rel);
         const dst = join(BLUR_HOME, rel);
         try {
           if (!existsSync(src)) continue;
-          if (statSafe(src)?.isDirectory()) {
-            rmrf(dst);
-            cpRecursive(src, dst);
-          } else {
+          if (!existsSync(dst)) {
             mkdirSync(path.dirname(dst), { recursive: true });
             copyFileSync(src, dst);
+            log(`[resources] copied (new) ${rel}`);
+          } else {
+            log(`[resources] kept user ${rel}`);
           }
-          log(`[resources] copied ${rel}`);
         } catch (e) {
-          log(`[resources] copy error for ${rel}:`, String(e?.message || e));
+          log(`[resources] copy error for ${rel}: ${String(e?.message || e)}`);
+        }
+      }
+
+      for (const rel of dirsReplaceAlways) {
+        const src = join(bundledRoot, rel);
+        const dst = join(BLUR_HOME, rel);
+        try {
+          if (!existsSync(src)) continue;
+          rmrf(dst);
+          cpRecursive(src, dst);
+          log(`[resources] replaced dir ${rel}`);
+        } catch (e) {
+          log(`[resources] dir copy error for ${rel}: ${String(e?.message || e)}`);
         }
       }
     }
 
-    // ✅ FIX: Copy heavy models only once using a sentinel file.
     const modelsDst = join(BLUR_HOME, "models");
     const modelsSentinel = join(modelsDst, ".copied_ok");
     try {
       if (!existsSync(modelsSentinel)) {
         const src = join(bundledRoot, "models");
         if (existsSync(src)) {
-          rmrf(modelsDst); // Clean slate for a fresh copy
+          rmrf(modelsDst);
           cpRecursive(src, modelsDst);
           writeFileSync(modelsSentinel, String(Date.now()));
           log("[resources] Copied models (first-time seed).");
@@ -216,6 +246,7 @@ async function ensureBlurHomeAndUnpack() {
   process.env.BLUR_RESOURCES_DIR = process.resourcesPath || "";
   process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
 }
+
 
 /* ============================================================================
    CONFIG DISCOVERY
@@ -402,13 +433,13 @@ function startAIServer(useFastLoop = true) {
       PYTHONUNBUFFERED: "1",
       PYTHONPATH: [backendDir, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
       BLUR_CORE_PORT: CORE_PORT,
-      // ✅ OPTIMIZE: Clamp Python math backends to a single thread.
+      // ✅ PATCH A-2: Let backends breathe.
       KMP_DUPLICATE_LIB_OK: "TRUE",
-      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || "1",
-      VECLIB_MAXIMUM_THREADS: "1",
-      OPENBLAS_NUM_THREADS: "1",
-      GOTO_NUM_THREADS: "1",
-      MKL_NUM_THREADS: "1",
+      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || "4",
+      VECLIB_MAXIMUM_THREADS: process.env.VECLIB_MAXIMUM_THREADS || "4",
+      OPENBLAS_NUM_THREADS: process.env.OPENBLAS_NUM_THREADS || "4",
+      GOTO_NUM_THREADS: process.env.GOTO_NUM_THREADS || "4",
+      MKL_NUM_THREADS: process.env.MKL_NUM_THREADS || "4",
     },
     detached: process.platform !== "win32",
   });

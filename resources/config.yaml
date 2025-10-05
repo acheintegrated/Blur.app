@@ -309,7 +309,7 @@ engines:
       - --repeat-penalty=1.1
       - --gpu-layers=-1
     python_n_ctx: 4096
-    n_gpu_layers: 35
+    n_gpu_layers: 30
 
   afplay:
     kind: cli
