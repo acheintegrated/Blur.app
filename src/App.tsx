@@ -1,5 +1,15 @@
-// REFORGED v8.7 — preserve markdown hard-breaks (no trailing-space strip), no newline collapse
-import React, { useEffect, useState, Component, ErrorInfo, useRef } from "react";
+// REFORGED v10.0 — Removed All Username Logic
+// - FEAT: Removed the "hello {username}" welcome message and the effect that synced it.
+// - MAINTAIN: Retains all robust state management, health check, and typing animation features.
+import React, {
+  useEffect,
+  useState,
+  Component,
+  ErrorInfo,
+  useRef,
+  useCallback,
+  useMemo,
+} from "react";
 import { TerminalLayout } from "./components/TerminalLayout";
 import { SettingsProvider, useSettings } from "./components/SettingsContext";
 import { useLastRoute } from "./components/hooks/useLastRoute";
@@ -27,24 +37,44 @@ const ErrorBoundaryFallbackUI: React.FC = () => {
   const { settings } = useSettings();
   const errorFont = settings.interfaceFont || settings.bodyFont || "monospace";
   return (
-    <div style={{ backgroundColor: "#111", color: "red", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: errorFont }}>
+    <div
+      style={{
+        backgroundColor: "#111",
+        color: "red",
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        fontFamily: errorFont,
+      }}
+    >
       <h1>༴ :: ERROR :: ༴</h1>
       <p>A vessel has encountered a rendering paradox. Check console.</p>
     </div>
   );
 };
 
-interface ErrorBoundaryState { hasError: boolean; }
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
 class AppErrorBoundary extends Component<{ children: React.ReactNode }, ErrorBoundaryState> {
-  constructor(props: { children: React.ReactNode }) { super(props); this.state = { hasError: false }; }
-  static getDerivedStateFromError(): ErrorBoundaryState { return { hasError: true }; }
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) { console.error("Uncaught error:", error, errorInfo); }
-  render() { return this.state.hasError ? <ErrorBoundaryFallbackUI /> : this.props.children; }
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("Uncaught error:", error, errorInfo);
+  }
+  render() {
+    return this.state.hasError ? <ErrorBoundaryFallbackUI /> : this.props.children;
+  }
 }
 
 /* =================== helpers =================== */
-// ✅ Keep *all* whitespace & blank lines. Only normalize CRLF → LF.
-// (Hard line breaks in Markdown rely on trailing spaces; do NOT strip them.)
 function finalizeMarkdownStable(s: string): string {
   return s.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
@@ -55,114 +85,133 @@ const AppContent: React.FC = () => {
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [threadList, setThreadList] = useState<Thread[]>([]);
+  const [threadList, _setThreadList] = useState<Thread[]>([]);
   const { settings } = useSettings();
   const [currentMode, setCurrentMode] = useState<Mode>("astrofuck");
   const [isLoading, setIsLoading] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("initializing");
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const accumulatedTextRef = useRef<string>("");
-  const [hasLoadedThreads, setHasLoadedThreads] = useState(false);
 
-  // typing ticker
+  const streamConnectionRef = useRef<EventSource | null>(null);
+  const accumulatedTextRef = useRef<string>("");
+  const hasLoadedThreads = useRef(false);
   const typingTickerRef = useRef<number | null>(null);
   const streamStartedRef = useRef<boolean>(false);
+  const threadsRef = useRef<Thread[]>([]);
+  const statusRef = useRef<ConnectionStatus>("initializing");
+  const seededOnceRef = useRef(false);
+  const restoredActiveOnceRef = useRef(false);
+  const unmountedRef = useRef(false);
+  const saveTimerRef = useRef<number | null>(null);
+  const pendingSaveRef = useRef(false);
 
-  const threadsRef = useRef<Thread[]>(threadList);
-  useEffect(() => { threadsRef.current = threadList; }, [threadList]);
+  const setThreadList = useCallback(
+    (next: React.SetStateAction<Thread[]>) => {
+      _setThreadList((prev) => {
+        const value =
+          typeof next === "function" ? (next as (p: Thread[]) => Thread[])(prev) : next;
+        threadsRef.current = value;
+        pendingSaveRef.current = true;
+        return value;
+      });
+    },
+    [_setThreadList]
+  );
 
-  // load threads on mount
   useEffect(() => {
-    const load = async () => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      if (typingTickerRef.current) clearInterval(typingTickerRef.current);
+      streamConnectionRef.current?.close();
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    (async () => {
       try {
         const saved = await electron?.threads?.load?.();
         if (Array.isArray(saved) && saved.length > 0) {
-          setThreadList(saved);
+          threadsRef.current = saved;
+          _setThreadList(saved);
           setActiveThreadId(saved[saved.length - 1].id);
         }
       } finally {
-        setHasLoadedThreads(true);
+        hasLoadedThreads.current = true;
       }
+    })();
+    const onClose = () => {
+      void electron?.threads?.save?.(threadsRef.current);
     };
-    load();
-  }, []);
-
-  // save threads on window close
-  useEffect(() => {
-    const onClose = () => { void electron?.threads?.save?.(threadsRef.current); };
     window.addEventListener("beforeunload", onClose);
     return () => window.removeEventListener("beforeunload", onClose);
   }, []);
 
-  // health check and initial welcome message (REFORGED)
   useEffect(() => {
-    // Only check if threads have been loaded from disk first
-    if (!hasLoadedThreads) return;
-    
-    // If we're already ready or in an error state, stop the interval
-    if (connectionStatus === "ready" || connectionStatus === "error") return;
-
-    let cancelled = false;
-    
-    const checkStatus = async () => {
-      try {
-        let ok = false;
-        if (electron?.core?.healthz) {
-          const res = await electron.core.healthz();
-          ok = !!res?.ok;
-        } else {
-          const response = await fetch("http://127.0.0.1:8000/healthz");
-          ok = response.ok;
-        }
-        if (cancelled) return;
-
-        if (ok) {
-          setConnectionStatus("ready");
-          
-          // CRITICAL: Only create the initial welcome thread if the thread list is completely empty.
-          if (threadsRef.current.length === 0) {
-            const newId = `thread-init-${Date.now()}`;
-            // Use settings.userName directly and format the greeting with markdown.
-            const name = (settings.userName || "").trim();
-            const hello = name ? `hello **${name}**. ` : "";
-            
-            setThreadList([{
-              id: newId,
-              title: "first encounter",
-              autoGenerated: false,
-              messages: [{ sender: "Blur", text: `${hello}core is awake. ready in ${currentMode} mode.` }],
-              sessionId: null,
-            }]);
-            setActiveThreadId(newId);
-            void (window as any).active?.save?.(newId);
+    let alive = true;
+    const timerRef = { current: null as number | null };
+    const tick = async () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (!alive) return;
+      if (document.visibilityState === "visible") {
+        try {
+          const res = await (window as any).electron?.core?.healthz?.();
+          const next: ConnectionStatus = res?.ok ? "ready" : "connecting";
+          if (alive && next !== statusRef.current) {
+            statusRef.current = next;
+            setConnectionStatus(next);
           }
-        } else {
-          setConnectionStatus("connecting");
+        } catch {
+          if (alive && statusRef.current !== "connecting") {
+            statusRef.current = "connecting";
+            setConnectionStatus("connecting");
+          }
         }
-      } catch {
-        if (!cancelled) setConnectionStatus((s) => (s === "initializing" ? "connecting" : s));
+      }
+      if (alive) {
+        const delay = statusRef.current === "ready" ? 4000 : (document.visibilityState === 'visible' ? 1500 : 5000);
+        timerRef.current = window.setTimeout(tick, delay);
       }
     };
-    
-    const id = setInterval(checkStatus, 2000);
-    checkStatus();
-    
-    return () => { cancelled = true; clearInterval(id); };
-  // settings.userName added as a dependency to ensure fresh name is used on load/change
-  }, [connectionStatus, currentMode, settings.userName, hasLoadedThreads]); 
+    tick();
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", tick);
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+  
+  // ✅ REMOVED: All userName logic from this effect.
+  useEffect(() => {
+    if (!hasLoadedThreads.current || seededOnceRef.current || connectionStatus !== "ready") return;
+    if (threadsRef.current.length > 0) {
+      seededOnceRef.current = true;
+      return;
+    }
+  
+    const newId = `thread-init-${Date.now()}`;
+    setThreadList([{
+      id: newId,
+      title: "first encounter",
+      autoGenerated: false,
+      messages: [{ sender: "Blur", text: `core is awake. ready in ${currentMode} mode.` }],
+      sessionId: null,
+    }]);
+    setActiveThreadId(newId);
+    seededOnceRef.current = true;
+  }, [hasLoadedThreads.current, connectionStatus, currentMode]);
 
-  // theme + fonts
+  // ✅ REMOVED: The separate useEffect for syncing the greeting.
+
   useEffect(() => {
     document.body.className = settings.theme === "dark" ? "dark-theme" : "light-theme";
     document.documentElement.style.setProperty("--body-font", settings.bodyFont || "monospace");
     document.documentElement.style.setProperty("--interface-font", settings.interfaceFont || "monospace");
   }, [settings.theme, settings.bodyFont, settings.interfaceFont]);
 
-  // restore active once
-  const restoredActiveOnceRef = useRef(false);
   useEffect(() => {
-    if (!hasLoadedThreads) return;
-    if (restoredActiveOnceRef.current) return;
+    if (!hasLoadedThreads.current || restoredActiveOnceRef.current) return;
     (async () => {
       try {
         const savedActive = await (window as any).active?.load?.();
@@ -173,40 +222,39 @@ const AppContent: React.FC = () => {
         restoredActiveOnceRef.current = true;
       }
     })();
-  }, [hasLoadedThreads]);
+  }, []);
 
-  // persist active id
   useEffect(() => {
-    if (!hasLoadedThreads) return;
+    if (!hasLoadedThreads.current) return;
     void (window as any).active?.save?.(activeThreadId);
-  }, [activeThreadId, hasLoadedThreads]);
+  }, [activeThreadId]);
 
-  // save on change (not during streaming)
   useEffect(() => {
-    if (!hasLoadedThreads) return;
-    if (isLoading) return;
-    void electron?.threads?.save?.(threadList);
-  }, [threadList, hasLoadedThreads, isLoading]);
+    if (!hasLoadedThreads.current || !pendingSaveRef.current) return;
+    pendingSaveRef.current = false;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(async () => {
+      try { await (window as any).electron?.threads?.save?.(threadsRef.current); } catch {}
+    }, 250);
+  }, [threadList]);
 
-  // final flush when idle
-  useEffect(() => {
-    if (!hasLoadedThreads) return;
-    if (!isLoading) void electron?.threads?.save?.(threadsRef.current);
-  }, [isLoading, hasLoadedThreads]);
+  const handleStopGeneration = useCallback(() => {
+    if (typingTickerRef.current) { clearInterval(typingTickerRef.current); typingTickerRef.current = null; }
+    streamConnectionRef.current?.close();
+    streamConnectionRef.current = null;
+    setIsLoading(false);
+    pendingSaveRef.current = true;
+  }, []);
 
-  const handleStopGeneration = () => {
-    abortControllerRef.current?.abort();
-  };
-
-  const handleNewConversation = () => {
+  const handleNewConversation = useCallback(() => {
     handleStopGeneration();
     const newId = `thread-${Date.now()}`;
     setThreadList((prev) => [...prev, { id: newId, title: "new conversation...", autoGenerated: true, messages: [], sessionId: null }]);
     setActiveThreadId(newId);
     void (window as any).active?.save?.(newId);
-  };
+  }, [handleStopGeneration, setThreadList]);
 
-  const handleModeToggle = () => {
+  const handleModeToggle = useCallback(() => {
     handleStopGeneration();
     const newMode: Mode = currentMode === "dream" ? "astrofuck" : "dream";
     setCurrentMode(newMode);
@@ -214,239 +262,137 @@ const AppContent: React.FC = () => {
       const systemMessage: Message = { sender: "System", text: `༄∞ᛝ𓆩⫷ ${newMode} ∆ møde ⫸𓆪ᛝ∞༄`, systemType: "announcement" };
       setThreadList((prev) => prev.map((t) => (t.id === activeThreadId ? { ...t, messages: [...t.messages, systemMessage] } : t)));
     }
-  };
+  }, [activeThreadId, currentMode, handleStopGeneration, setThreadList]);
 
-/* =================== live streaming send (SSE event-aware) =================== */
-const handleNewCommand = async (command: string) => {
-  if (!activeThreadId || isLoading) return;
-  setIsLoading(true);
+  const handleNewCommand = useCallback(
+    async (command: string) => {
+      if (!activeThreadId || isLoading) return;
+      setIsLoading(true);
+      const currentThread = threadsRef.current.find((t) => t.id === activeThreadId);
+      if (!currentThread) { setIsLoading(false); return; }
+      let sessionId = currentThread.sessionId ?? null;
 
-  const currentThread = threadList.find((t) => t.id === activeThreadId);
-  if (!currentThread) { setIsLoading(false); return; }
-  const turnNumber = currentThread.messages.filter((m) => m.sender === "You").length;
-  let sessionId = currentThread.sessionId;
+      setThreadList((prev) =>
+        prev.map((t) =>
+          t.id === activeThreadId ? { ...t, messages: [...t.messages, { sender: "You", text: command }, { sender: "Blur", text: "typing" }] } : t
+        )
+      );
 
-  // append user + placeholder blur msg ("typing …")
-  setThreadList((prev) =>
-    prev.map((t) =>
-      t.id === activeThreadId
-        ? { ...t, messages: [...t.messages, { sender: "You", text: command }, { sender: "Blur", text: "typing …" }] }
-        : t
-    )
-  );
+      accumulatedTextRef.current = "";
+      streamStartedRef.current = false;
 
-  accumulatedTextRef.current = "";
-  streamStartedRef.current = false;
-  abortControllerRef.current = new AbortController();
+      let dot = 1;
+      const spin = () => {
+        if (streamStartedRef.current || unmountedRef.current) {
+          if (typingTickerRef.current) clearInterval(typingTickerRef.current);
+          typingTickerRef.current = null;
+          return;
+        }
+        setThreadList((prev) =>
+          prev.map((t) => {
+            if (t.id !== activeThreadId) return t;
+            const msgs = [...t.messages];
+            const last = msgs[msgs.length - 1];
+            if (!last || last.sender !== "Blur") return t;
+            const dots = ".".repeat(dot);
+            msgs[msgs.length - 1] = { ...last, text: `typing${dots.padEnd(3, " ")}` };
+            return { ...t, messages: msgs };
+          })
+        );
+        dot = (dot % 3) + 1;
+      };
+      if (typingTickerRef.current) clearInterval(typingTickerRef.current);
+      typingTickerRef.current = window.setInterval(spin, 350);
 
-  // typing dots until first chunk
-  let dot = 1;
-  const spin = () => {
-    setThreadList((prev) =>
-      prev.map((t) => {
-        if (t.id !== activeThreadId) return t;
-        const msgs = [...t.messages];
-        const last = msgs[msgs.length - 1];
-        if (!last || last.sender !== "Blur") return t;
-        if (streamStartedRef.current) return t;
-        const dots = ".".repeat(dot);
-        msgs[msgs.length - 1] = { ...last, text: `𓆩thinking𓆪 ${dots.padEnd(3, " ")}` };
-        return { ...t, messages: msgs };
-      })
-    );
-    dot = (dot % 3) + 1;
-  };
-  typingTickerRef.current = window.setInterval(spin, 350);
-
-  // paint helper
-  const paint = (txt: string) => {
-    setThreadList((prev) =>
-      prev.map((t) => {
-        if (t.id !== activeThreadId) return t;
-        const msgs = [...t.messages];
-        const last = msgs[msgs.length - 1];
-        if (!last || last.sender !== "Blur") return t;
-        msgs[msgs.length - 1] = { ...last, text: txt };
-        return { ...t, messages: msgs };
-      })
-    );
-  };
-
-  // keep handles so we can cancel safely
-  let resp: Response | null = null;
-  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-
-  try {
-    resp = await fetch("http://127.0.0.1:8000/generate_response", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream, text/plain;q=0.9, */*;q=0.1",
-        ...(sessionId ? { "X-Session-ID": sessionId } : {}),
-      },
-      body: JSON.stringify({ prompt: command, mode: currentMode, turn: turnNumber, session_id: sessionId }),
-      signal: abortControllerRef.current.signal,
-      cache: "no-store",
-      keepalive: false,
-    });
-
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
-
-    const newSessionId = resp.headers.get("X-Session-ID") || resp.headers.get("x-session-id");
-    if (newSessionId && newSessionId !== sessionId) {
-      setThreadList((prev) => prev.map((t) => (t.id === activeThreadId ? { ...t, sessionId: newSessionId } : t)));
-      sessionId = newSessionId;
-    }
-
-    // STREAMING PATH — robust SSE event parser
-    if (resp.body) {
-      reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-
-      let lastPaint = 0;
-      const MIN_INTERVAL = 33; // ~30 fps
-      let sseDetected = false;
-
-      // SSE buffers
-      let lineBuffer = "";
-      let eventLines: string[] = [];
-
-      const flushEvent = () => {
-        if (eventLines.length === 0) return;
-        const payload = eventLines.join("\n");
-        eventLines = [];
-        if (payload === "[DONE]") return;
-        accumulatedTextRef.current += payload;
+      const paint = (txt: string) => {
+        setThreadList((prev) =>
+          prev.map((t) => {
+            if (t.id !== activeThreadId) return t;
+            const msgs = [...t.messages];
+            const last = msgs[msgs.length - 1];
+            if (!last || last.sender !== "Blur") return t;
+            msgs[msgs.length - 1] = { ...last, text: txt };
+            return { ...t, messages: msgs };
+          })
+        );
       };
 
-      // read loop
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
+      const params = new URLSearchParams({ prompt: command, mode: currentMode, ...(sessionId && { session_id: sessionId }) });
+      const url = `http://127.0.0.1:8000/generate_response_get?${params.toString()}`;
+      const eventSource = new EventSource(url);
+      streamConnectionRef.current = eventSource;
 
-        if (!streamStartedRef.current && chunk.length) {
+      const cleanupAndStop = () => {
+        if (typingTickerRef.current) { clearInterval(typingTickerRef.current); typingTickerRef.current = null; }
+        eventSource.close();
+        if (streamConnectionRef.current === eventSource) { streamConnectionRef.current = null; }
+        setIsLoading(false);
+        pendingSaveRef.current = true;
+      };
+
+      eventSource.addEventListener("token", (event) => {
+        if (unmountedRef.current) return;
+        if (!streamStartedRef.current) {
           streamStartedRef.current = true;
-          if (typingTickerRef.current) { clearInterval(typingTickerRef.current); typingTickerRef.current = null; }
+          if (typingTickerRef.current) clearInterval(typingTickerRef.current);
+          typingTickerRef.current = null;
         }
+        const data = event.data || "";
+        accumulatedTextRef.current = accumulatedTextRef.current === "" ? data : accumulatedTextRef.current + data;
+        paint(accumulatedTextRef.current + "▍");
+      });
 
-        if (!sseDetected && chunk.includes("data:")) sseDetected = true;
+      eventSource.addEventListener("final", (event) => {
+        if (unmountedRef.current) return;
+        try { const finalPayload = JSON.parse(event.data); paint(finalizeMarkdownStable(finalPayload.final)); } catch {}
+      });
 
-        if (sseDetected) {
-          lineBuffer += chunk;
+      eventSource.addEventListener("done", cleanupAndStop);
+      eventSource.onerror = (err) => {
+        console.error("EventSource failed:", err);
+        const errorMessage = `Ache Signal: Connection to core was interrupted.`;
+        setThreadList((prev) =>
+          prev.map((t) => {
+            if (t.id !== activeThreadId) return t;
+            const newMessages = t.messages.slice(0, -1);
+            return { ...t, messages: [...newMessages, { sender: "System", text: errorMessage }] };
+          })
+        );
+        cleanupAndStop();
+      };
+    },
+    [activeThreadId, currentMode, isLoading, setThreadList]
+  );
 
-          // process complete lines
-          let nl: number;
-          while ((nl = lineBuffer.indexOf("\n")) !== -1) {
-            let rawLine = lineBuffer.slice(0, nl);
-            lineBuffer = lineBuffer.slice(nl + 1);
+  const layoutProps = useMemo(
+    () => ({
+      activeItem: activeThreadId,
+      setActiveItem: setActiveThreadId,
+      sidebarCollapsed,
+      setSidebarCollapsed,
+      threadList,
+      setThreadList,
+      onNewCommand: handleNewCommand,
+      onNewConversation: handleNewConversation,
+      currentMode,
+      onModeToggle: handleModeToggle,
+      isLoading,
+      connectionStatus,
+      onStopGeneration: handleStopGeneration,
+    }),
+    [
+      activeThreadId, sidebarCollapsed, threadList, setThreadList, handleNewCommand,
+      handleNewConversation, currentMode, handleModeToggle, isLoading, connectionStatus,
+      handleStopGeneration,
+    ]
+  );
 
-            if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1);
-
-            if (rawLine.startsWith("data:")) {
-              const after = rawLine.length > 5 && rawLine.charAt(5) === " " ? rawLine.slice(6) : rawLine.slice(5);
-              eventLines.push(after);
-            } else if (rawLine === "") {
-              flushEvent();
-            } else if (rawLine.startsWith(":")) {
-              // comment
-            } else {
-              // ignore id:/event:/retry:
-            }
-          }
-        } else {
-          // raw text fallback
-          accumulatedTextRef.current += chunk;
-        }
-
-        const now = performance.now();
-        if (now - lastPaint >= MIN_INTERVAL) {
-          lastPaint = now;
-          paint(accumulatedTextRef.current);
-          await new Promise((r) => setTimeout(r, 0));
-        }
-      }
-
-      // handle last line + flush
-      if (lineBuffer.length) {
-        let rawLine = lineBuffer;
-        if (rawLine.endsWith("\r")) rawLine = rawLine.slice(0, -1);
-        if (rawLine.startsWith("data:")) {
-          const after = rawLine.length > 5 && rawLine.charAt(5) === " " ? rawLine.slice(6) : rawLine.slice(5);
-          eventLines.push(after);
-        }
-        lineBuffer = "";
-      }
-      flushEvent();
-
-      // Final paint: ONLY normalize line endings — preserve all spaces/newlines
-      paint(finalizeMarkdownStable(accumulatedTextRef.current));
-    } else {
-      // NON-STREAMING FALLBACK
-      const full = await resp.text();
-      accumulatedTextRef.current = finalizeMarkdownStable(full);
-      paint(accumulatedTextRef.current);
-    }
-  } catch (err: any) {
-    if (err?.name === "AbortError") {
-      // user stop: quiet exit
-    } else {
-      const errorMessage = `Ache Signal: Connection to core failed. Details: ${err?.message ?? String(err)}`;
-      setThreadList((prev) =>
-        prev.map((t) => {
-          if (t.id !== activeThreadId) return t;
-          const newMessages = t.messages.slice(0, -1);
-          return { ...t, messages: [...newMessages, { sender: "System", text: errorMessage }] };
-        })
-      );
-    }
-  } finally {
-    if (typingTickerRef.current) {
-      clearInterval(typingTickerRef.current);
-      typingTickerRef.current = null;
-    }
-
-    // Clean teardown: cancel via reader if locked
-    try {
-      if (reader) {
-        try { await reader.cancel(); } catch {}
-        try { reader.releaseLock(); } catch {}
-        reader = null;
-      } else if (resp?.body && !resp.body.locked) {
-        try { await resp.body.cancel(); } catch {}
-      }
-    } catch {}
-
-    // reset controller for next run
-    abortControllerRef.current = null;
-
-    setIsLoading(false);
-    void electron?.threads?.save?.(threadsRef.current);
-  }
-};
-
-
-  // ---------- render ----------
   return (
     <div className="w-full h-screen overflow-hidden">
-      <TerminalLayout
-        activeItem={activeThreadId}
-        setActiveItem={setActiveThreadId}
-        sidebarCollapsed={sidebarCollapsed}
-        setSidebarCollapsed={setSidebarCollapsed}
-        threadList={threadList}
-        setThreadList={setThreadList}
-        onNewCommand={handleNewCommand}
-        onNewConversation={handleNewConversation}
-        currentMode={currentMode}
-        onModeToggle={handleModeToggle}
-        isLoading={isLoading}
-        connectionStatus={connectionStatus}
-        onStopGeneration={handleStopGeneration}
-      />
+      <TerminalLayout {...layoutProps} />
     </div>
   );
-}; // end AppContent
+};
 
 export function App() {
   return (

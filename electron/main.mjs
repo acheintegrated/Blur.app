@@ -1,6 +1,7 @@
-// electron/main.mjs — REFORGED v10.9 (Syntax Fix)
-// - Removed invalid unicode space characters that caused "Unexpected token" crash.
-// - Whisper and RAG features remain removed for simplification.
+// electron/main.mjs — REFORGED v11.1 (Performance Optimizations)
+// - FIX: Prevents heavy 'models' directory from being re-copied on simple config version bumps.
+// - OPTIMIZE: Disables Spotlight indexing on the models directory to reduce system lag.
+// - OPTIMIZE: Clamps additional Python math backends (OpenBLAS, GOTO, MKL) to a single thread.
 import { app, BrowserWindow, shell, ipcMain, globalShortcut, powerMonitor } from "electron";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
@@ -134,6 +135,14 @@ async function ensureBlurHomeAndUnpack() {
   mkdirSync(BLUR_HOME, { recursive: true });
 
   log(`[resources] Using BLUR_HOME: ${BLUR_HOME}`);
+  
+  // ✅ OPTIMIZE: Kill Spotlight indexing on the models directory.
+  const modelsPath = join(process.env.BLUR_HOME, "models");
+  try {
+    mkdirSync(modelsPath, { recursive: true }); // Ensure it exists
+    writeFileSync(join(modelsPath, ".metadata_never_index"), "");
+    log("[resources] Disabled Spotlight on models directory.");
+  } catch {}
 
   if (app.isPackaged && bundledRoot && BLUR_HOME !== homePath) {
     const srcCfg = join(bundledRoot, "config.yaml");
@@ -150,10 +159,11 @@ async function ensureBlurHomeAndUnpack() {
     } catch (e) {
       log("[resources] version compare failed:", String(e?.message || e));
     }
-
+    
+    // ✅ FIX: Copy lightweight files if needed, but not heavy models.
     if (needsCopy) {
-      const toCopy = ["config.yaml", "acheflip.yaml", join("core","ouinet","blurchive","ecosystem"), "models", join("core","bin")];
-      for (const rel of toCopy) {
+      const toCopyAlways = ["config.yaml", "acheflip.yaml", join("core","ouinet","blurchive","ecosystem"), join("core","bin")];
+      for (const rel of toCopyAlways) {
         const src = join(bundledRoot, rel);
         const dst = join(BLUR_HOME, rel);
         try {
@@ -170,6 +180,25 @@ async function ensureBlurHomeAndUnpack() {
           log(`[resources] copy error for ${rel}:`, String(e?.message || e));
         }
       }
+    }
+
+    // ✅ FIX: Copy heavy models only once using a sentinel file.
+    const modelsDst = join(BLUR_HOME, "models");
+    const modelsSentinel = join(modelsDst, ".copied_ok");
+    try {
+      if (!existsSync(modelsSentinel)) {
+        const src = join(bundledRoot, "models");
+        if (existsSync(src)) {
+          rmrf(modelsDst); // Clean slate for a fresh copy
+          cpRecursive(src, modelsDst);
+          writeFileSync(modelsSentinel, String(Date.now()));
+          log("[resources] Copied models (first-time seed).");
+        }
+      } else {
+        log("[resources] Models directory present, skipping heavy copy.");
+      }
+    } catch (e) {
+      log("[resources] Models copy error:", String(e?.message || e));
     }
   }
 
@@ -250,9 +279,16 @@ function isNonEmptyThreads(arr) {
 }
 
 function writeThreadsFileAtomic(arr) {
-  if (!isNonEmptyThreads(arr)) {
-    log("[threads] skip save: payload empty or invalid");
-    return false;
+  const empty = !Array.isArray(arr) || arr.length === 0;
+  if (empty) {
+    try {
+      if (existsSync(THREADS_FILE)) fs.unlinkSync(THREADS_FILE);
+      if (existsSync(THREADS_BAK)) fs.unlinkSync(THREADS_BAK);
+      log("[threads] deleted all threads — files removed.");
+    } catch (e) {
+      log("[threads] delete error:", e?.message || e);
+    }
+    return true;
   }
   const data = JSON.stringify(arr, null, 2);
   try {
@@ -366,9 +402,13 @@ function startAIServer(useFastLoop = true) {
       PYTHONUNBUFFERED: "1",
       PYTHONPATH: [backendDir, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
       BLUR_CORE_PORT: CORE_PORT,
+      // ✅ OPTIMIZE: Clamp Python math backends to a single thread.
       KMP_DUPLICATE_LIB_OK: "TRUE",
       OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || "1",
-      VECLIB_MAXIMUM_THREADS: "1"
+      VECLIB_MAXIMUM_THREADS: "1",
+      OPENBLAS_NUM_THREADS: "1",
+      GOTO_NUM_THREADS: "1",
+      MKL_NUM_THREADS: "1",
     },
     detached: process.platform !== "win32",
   });

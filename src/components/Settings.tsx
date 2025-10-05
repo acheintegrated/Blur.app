@@ -1,5 +1,4 @@
-// src/components/Settings.tsx
-
+// REFORGED v4.0 — Removed User Name UI
 import React, { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { RainbowGlow } from "./RainbowGlow";
@@ -11,8 +10,9 @@ interface SettingsProps {
 
 export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const { settings, updateSettings } = useSettings();
-  // Filter the initial active tab to ensure it's one of the remaining tabs
-  const [activeTab, setActiveTab] = useState<"user" | "fonts" | "about">("user");
+  
+  // ✅ REMOVED: "user" tab and defaulted to "fonts"
+  const [activeTab, setActiveTab] = useState<"fonts" | "about">("fonts");
   const [localSettings, setLocalSettings] = useState({ ...settings });
   const [saving, setSaving] = useState(false);
 
@@ -25,11 +25,8 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
   const handleSave = async () => {
     try {
       setSaving(true);
-      // Ensure we only save the fields we still care about.
-      // TypeScript should enforce this based on the new Settings type, 
-      // but we explicitly remove 'instructions' and 'memory' just in case the context still has them.
-      const { instructions, memory, notifications, soundEffects, autoSave, saveInterval, ...restOfLocalSettings } = localSettings;
-      await updateSettings(restOfLocalSettings);
+      // We can now just pass localSettings directly, as 'userName' no longer exists on the type
+      await updateSettings(localSettings);
       onClose();
     } finally {
       setSaving(false);
@@ -51,8 +48,8 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
     { value: "Petrona", label: "Petrona" },
   ];
   
-  // Define the tabs you want to keep
-  const TABS_TO_KEEP: ("user" | "fonts" | "about")[] = ["user", "fonts", "about"];
+  // ✅ REMOVED: "user" tab from the list
+  const TABS_TO_KEEP: ("fonts" | "about")[] = ["fonts", "about"];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -76,7 +73,6 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
           {/* Sidebar */}
           <div className="w-1/4 border-r border-zinc-900 p-4">
             <nav className="space-y-2">
-              {/* Only map the tabs we want to keep */}
               {TABS_TO_KEEP.map((tab) => (
                 <button
                   key={tab}
@@ -95,100 +91,53 @@ export const Settings: React.FC<SettingsProps> = ({ onClose }) => {
 
           {/* Content */}
           <div className="w-3/4 p-6 overflow-y-auto">
-            {activeTab === "user" && (
-              <div className="space-y-6">
-                <h2 className="text-white text-lg mb-4">about the meat-being</h2>
-
-                <div className="space-y-2">
-                  <label className="block text-gray-300">name</label>
-                  <input
-                    type="text"
-                    value={localSettings.userName}
-                    onChange={(e) => updateLocalSetting("userName", e.target.value)}
-                    className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
-                  />
-                </div>
-
-                {/* REMOVED: Notifications Toggle */}
-                {/* REMOVED: Sound Effects Toggle */}
-              </div>
-            )}
-
-            {/* REMOVED: {activeTab === "instructions" && (...) } */}
-            {/* REMOVED: {activeTab === "memory" && (...) } */}
+            
+            {/* ✅ REMOVED: The entire "user" tab content block */}
 
             {activeTab === "fonts" && (
               <div className="space-y-6">
                 <h2 className="text-white text-lg mb-4">font settings</h2>
-
                 <div className="space-y-2">
                   <label className="block text-gray-300">interface font</label>
                   <select
                     value={localSettings.interfaceFont}
-                    onChange={(e) =>
-                      updateLocalSetting("interfaceFont", e.target.value)
-                    }
+                    onChange={(e) => updateLocalSetting("interfaceFont", e.target.value)}
                     className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white"
                     style={{ fontFamily: localSettings.interfaceFont }}
                   >
                     {fontOptions.map((f) => (
-                      <option
-                        key={f.value}
-                        value={f.value}
-                        style={{ fontFamily: f.value }}
-                      >
+                      <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
                         {f.label}
                       </option>
                     ))}
                   </select>
-
                   <div className="mt-2 rounded border border-zinc-800 bg-zinc-900 p-4">
-                    <div
-                      style={{ fontFamily: localSettings.interfaceFont }}
-                      className="text-xl text-white"
-                    >
+                    <div style={{ fontFamily: localSettings.interfaceFont }} className="text-xl text-white">
                       Interface Heading — Aa
                     </div>
-                    <div
-                      style={{ fontFamily: localSettings.interfaceFont }}
-                      className="text-sm text-gray-300 mt-1"
-                    >
+                    <div style={{ fontFamily: localSettings.interfaceFont }} className="text-sm text-gray-300 mt-1">
                       {SAMPLE_TEXT}
                     </div>
                   </div>
                 </div>
-
                 <div className="space-y-2">
                   <label className="block text-gray-300">body text font</label>
                   <select
                     value={localSettings.bodyFont}
-                    onChange={(e) =>
-                      updateLocalSetting("bodyFont", e.target.value)
-                    }
+                    onChange={(e) => updateLocalSetting("bodyFont", e.target.value)}
                     className="w-full bg-zinc-900 border border-zinc-900 px-3 py-2 text-white"
                   >
                     {fontOptions.map((f) => (
-                      <option
-                        key={f.value}
-                        value={f.value}
-                        style={{ fontFamily: f.value }}
-                      >
+                      <option key={f.value} value={f.value} style={{ fontFamily: f.value }}>
                         {f.label}
                       </option>
                     ))}
                   </select>
-
                   <div className="mt-2 rounded border border-zinc-800 bg-zinc-900 p-4">
-                    <div
-                      style={{ fontFamily: localSettings.bodyFont }}
-                      className="text-xl text-white"
-                    >
+                    <div style={{ fontFamily: localSettings.bodyFont }} className="text-xl text-white">
                       Body Heading — Aa
                     </div>
-                    <p
-                      style={{ fontFamily: localSettings.bodyFont }}
-                      className="text-base text-gray-300 mt-1 leading-7"
-                    >
+                    <p style={{ fontFamily: localSettings.bodyFont }} className="text-base text-gray-300 mt-1 leading-7">
                       {SAMPLE_TEXT}
                     </p>
                   </div>
