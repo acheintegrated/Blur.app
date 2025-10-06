@@ -38,27 +38,25 @@
 
     "asar": true,
     "asarUnpack": [
-      "electron/backend/**"
+      "electron/backend/**",
+      "**/*.node"
     ],
 
     "files": [
       "dist/**",
       "electron/**",
-      "main.mjs",
-      "preload.mjs",
       "!**/*.map"
     ],
 
     "extraResources": [
       {
         "from": ".",
-        "to": "blur",
+        "to": "Blur",
         "filter": [
           "config.yaml",
           "acheflip.yaml",
           "models/**",
-          "core/ouinet/blurchive/ecosystem/**",
-          "core/bin/**"
+          "core/**"
         ]
       },
       {
@@ -74,7 +72,7 @@
     ],
 
     "mac": {
-      "target": [ "dmg" ],
+      "target": ["dmg"],
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
       "entitlements": "build/entitlements.mac.plist",

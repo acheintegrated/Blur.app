@@ -115,7 +115,7 @@ export const CommandInput: React.FC<CommandInputProps> = ({
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
           onKeyUp={handleKeyUp}
-          className="bg-transparent flex-1 outline-none text-white resize-none overflow-hidden px-4"
+          className="bg-transparent flex-1 outline-none text-white resize-none overflow-y-auto px-4"
           placeholder={isActive ? 'start typing' : ''}
           spellCheck="false"
           rows={1}
@@ -126,8 +126,10 @@ export const CommandInput: React.FC<CommandInputProps> = ({
             maxHeight: `${window.innerHeight * 0.27}px`,
             paddingTop: '8px',
             marginTop: '0',
+            overflowY: 'auto', // ensures scrollbars appear when needed
           }}
         />
+
       </div>
 
       <div className="flex justify-end px-3 pb-3">

@@ -1,10 +1,9 @@
-// electron/main.mjs — REFORGED v11.7 (Final Polish)
-// - SPLASH: "Blur." is bolded, "initiating..." is lowercase, and loading bar is a magenta/lilac gradient.
-// - PERF: Disabled background throttling & spellcheck, enabled aggressive rasterization, shows window on first paint.
-// - INSTANT FEEL: Dedicated splash window; no more black gap.
-// - FAST-BOOT: Window loads immediately; heavy seeding + AI boot run in parallel.
-// - PATH HYGIENE: Dev uses ./resources, packaged apps prefer in-bundle resources, copy only on version bump.
-// - CONTROLS: BLUR_DISABLE_GPU=1, BLUR_NO_FASTLOOP=1, BLUR_SKIP_VERSION_COPY=1, etc.
+// electron/main.mjs — REFORGED v11.8 (Standalone & Self-Carrying)
+// - STANDALONE: Uses embedded blur_env + bundled Blur payload first; no system Python required in prod.
+// - SPLASH: Instant, glowing bar; no black gap.
+// - FAST-BOOT: Seeds userData only on version change; AI Core spawns in parallel.
+// - SAFETY: In packaged apps, refuses to start if embedded Python is missing.
+// - TOGGLES: BLUR_DISABLE_GPU=1, BLUR_NO_FASTLOOP=1, BLUR_SKIP_VERSION_COPY=1
 
 import { app, BrowserWindow, shell, ipcMain, powerMonitor } from "electron";
 import { spawn } from "child_process";
@@ -22,13 +21,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /* ============================================================================
-   FLAGS & PERF SWITCHES
+   FLAGS & PERF
 ============================================================================ */
 if (process.env.BLUR_DISABLE_GPU === "1") app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("allow-running-insecure-content");
 app.commandLine.appendSwitch("disable-features", "OutOfBlinkCors");
 app.commandLine.appendSwitch("enable-features", "CanvasOopRasterization,PartialSwap");
-
 const SHOW_OVERLAY = !!process.env.BLUR_DEBUG_OVERLAY;
 const isMac = process.platform === "darwin";
 
@@ -40,21 +38,17 @@ let mainWindow = null;
 let splashWindow = null;
 let aiReady = false;
 let logFile = null;
-let model_status = { status: "loading", message: "initiating…" }; // Lowercase default
+let model_status = { status: "loading", message: "initiating…" };
 let isQuitting = false;
-let lastRendererFinalAt = 0;
+let finalThreadsPayload = null;
 
 const CORE_PORT = String(process.env.BLUR_CORE_PORT || "8000");
 const CORE_HOST = process.env.BLUR_CORE_HOST || "127.0.0.1";
 const CORE_BASE = `http://${CORE_HOST}:${CORE_PORT}`;
 const CORE_HEALTH = `${CORE_BASE}/healthz`;
 
-const DEV_URL  = process.env.VITE_DEV_SERVER_URL  || `http://localhost:6969`;
+const DEV_URL = process.env.VITE_DEV_SERVER_URL || `http://localhost:6969`;
 const APP_NAME = "Blur";
-
-/* ============================================================================
-   APP NAME & USERDATA
-============================================================================ */
 app.setName(APP_NAME);
 const appDataRoot = app.getPath("appData");
 const canonicalUserData = join(appDataRoot, APP_NAME);
@@ -62,10 +56,10 @@ app.setPath("userData", canonicalUserData);
 try { if (!existsSync(canonicalUserData)) mkdirSync(canonicalUserData, { recursive: true }); } catch {}
 
 /* ============================================================================
-   LOGGER
+   LOGGING
 ============================================================================ */
 const t0 = Date.now();
-const bootMark = (label) => { const ms = ((Date.now() - t0)/1000).toFixed(2); log(`[boot-timing] +${ms}s ${label}`); };
+const bootMark = (label) => { const ms = ((Date.now() - t0)/1000).toFixed(2); log(`[boot] +${ms}s ${label}`); };
 const initLogger = () => {
   try {
     const logDir = join(app.getPath("userData"), "logs");
@@ -81,7 +75,7 @@ const log = (...args) => {
 };
 
 /* ============================================================================
-   BLUR_HOME + RESOURCES (HYBRID LOGIC)
+   PATHS / RESOURCES
 ============================================================================ */
 function homeBlurPath() { return resolve(os.homedir(), "blur"); }
 function packagedBlurPath() { return join(app.getPath("appData"), APP_NAME, "blur"); }
@@ -115,15 +109,11 @@ function readYamlVersion(text = "") {
 }
 
 async function ensureBlurHomeAndUnpack() {
-  // DEV: Prefer repo ./resources as BLUR_HOME so dev survives nuked App Support
+  // DEV: prefer repo ./resources
   if (!app.isPackaged) {
     const devRoot = resolve(app.getAppPath(), "resources");
-    if (existsSync(devRoot)) {
-      process.env.BLUR_HOME = devRoot;
-      log(`[dev] BLUR_HOME = ${devRoot}`);
-    } else {
-      log("[dev] ./resources missing; fallback to ~/blur");
-    }
+    if (existsSync(devRoot)) { process.env.BLUR_HOME = devRoot; log(`[dev] BLUR_HOME = ${devRoot}`); }
+    else { log("[dev] ./resources missing; fallback to ~/blur"); }
   }
 
   const envSet = !!(process.env.BLUR_HOME && process.env.BLUR_HOME.trim());
@@ -133,7 +123,8 @@ async function ensureBlurHomeAndUnpack() {
   if (!envSet) {
     const bundledRoot = getBundledBlurRoot();
     if (app.isPackaged && bundledRoot) {
-      process.env.BLUR_HOME = bundledRoot; // bundle-first
+      // BUNDLE-FIRST in packaged apps
+      process.env.BLUR_HOME = bundledRoot;
     } else {
       process.env.BLUR_HOME = homeExists ? homePath : (app.isPackaged ? packagedBlurPath() : homePath);
     }
@@ -143,17 +134,19 @@ async function ensureBlurHomeAndUnpack() {
   mkdirSync(BLUR_HOME, { recursive: true });
   log(`[resources] Using BLUR_HOME: ${BLUR_HOME}`);
 
+  // keep Spotlight quiet
   try {
     const modelsPath = join(BLUR_HOME, "models");
     mkdirSync(modelsPath, { recursive: true });
     writeFileSync(join(modelsPath, ".metadata_never_index"), "");
   } catch {}
 
+  // Seed only when not pointing directly at the bundle
   const bundledRoot = getBundledBlurRoot();
   const skipCopy = process.env.BLUR_SKIP_VERSION_COPY === "1";
   if (!skipCopy && bundledRoot && BLUR_HOME !== bundledRoot) {
     const filesCopyIfMissing = ["config.yaml", "acheflip.yaml"];
-    const dirsReplaceOnBump = ["core"]; // immutable payloads per version
+    const dirsReplaceOnBump = ["core"]; // immutable/critical payloads
 
     let needsCopy = false;
     try {
@@ -162,7 +155,7 @@ async function ensureBlurHomeAndUnpack() {
       const vSrc = existsSync(srcCfg) ? readYamlVersion(readFileSync(srcCfg, "utf8")) : "";
       const vDst = existsSync(dstCfg) ? readYamlVersion(readFileSync(dstCfg, "utf8")) : "";
       needsCopy = !existsSync(dstCfg) || (!!vSrc && vSrc !== vDst);
-      log(`[resources] bundled→home version check: src=${vSrc||"?"} dst=${vDst||"?"} needsCopy=${needsCopy}`);
+      log(`[resources] version check bundle→home: src=${vSrc||"?"} dst=${vDst||"?"} needsCopy=${needsCopy}`);
     } catch (e) { log("[resources] version compare failed:", String(e?.message || e)); }
 
     if (needsCopy) {
@@ -183,7 +176,7 @@ async function ensureBlurHomeAndUnpack() {
       }
     }
 
-    // One-time models seed with sentinel
+    // one-time models seed
     if (process.env.BLUR_SKIP_SEED_MODELS !== "1") {
       try {
         const modelsDst = join(BLUR_HOME, "models");
@@ -199,7 +192,7 @@ async function ensureBlurHomeAndUnpack() {
     }
   }
 
-  // Export useful env for children
+  // export useful env
   process.env.BLUR_RESOURCES_DIR = process.resourcesPath || "";
   process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
   if (!process.env.BLUR_CONFIG_PATH) {
@@ -209,7 +202,7 @@ async function ensureBlurHomeAndUnpack() {
 }
 
 /* ============================================================================
-   CONFIG DISCOVERY
+   CONFIG
 ============================================================================ */
 function requireConfigOrFail() {
   const envPath = process.env.BLUR_CONFIG_PATH;
@@ -229,7 +222,7 @@ function requireConfigOrFail() {
 }
 
 /* ============================================================================
-   PREFS (IPC)
+   PREFS / THREADS
 ============================================================================ */
 class JsonPrefs {
   constructor(file) { this.file = file; this.store = {}; this._loaded = false; }
@@ -251,10 +244,6 @@ function initPrefsIPC() {
   ipcMain.handle("env:get",     (_e, k) => process.env[k] ?? null);
   log(`[prefs] ready @ ${prefsPath}`);
 }
-
-/* ============================================================================
-   THREADS PERSISTENCE (IPC)
-============================================================================ */
 const THREADS_FILE = join(app.getPath("userData"), "threads.v1.json");
 const THREADS_TMP  = join(app.getPath("userData"), "threads.v1.json.tmp");
 const THREADS_BAK  = join(app.getPath("userData"), "threads.v1.json.bak");
@@ -283,14 +272,12 @@ ipcMain.handle("threads:load", () => {
   catch (e) { log("[threads] read failed, trying .bak:", e?.message || e); try { if (existsSync(THREADS_BAK)) return JSON.parse(readFileSync(THREADS_BAK, "utf8")); } catch {} return []; }
 });
 ipcMain.handle("threads:save", (_e, payload) => writeThreadsFileAtomic(payload));
-let finalThreadsPayload = null;
 ipcMain.handle("threads:send-final-state-for-quit", (_e, payload) => {
-  if (isNonEmptyThreads(payload)) { finalThreadsPayload = payload; lastRendererFinalAt = Date.now(); log("[quit] final threads payload received:", payload.length, "threads"); }
-  else { log("[quit] ignored final payload (empty)"); }
+  if (isNonEmptyThreads(payload)) { finalThreadsPayload = payload; }
 });
 
 /* ============================================================================
-   BACKEND DISCOVERY & PYTHON RESOLUTION
+   BACKEND / PYTHON
 ============================================================================ */
 function looksLikeBackendDir(p) {
   try {
@@ -321,21 +308,36 @@ function resolveCoreModule(backendDir) {
   for (const name of order) { if (existsSync(join(backendDir, name))) return `${basename(name, ".py")}:app`; }
   return "convo_chat_core:app";
 }
+function embeddedPythonCandidates() {
+  const r = process.resourcesPath || "";
+  return [
+    join(r, "blur_env", "bin", "python3"),
+    join(r, "blur_env-darwin-arm64", "bin", "python3"),
+    join(process.env.BLUR_HOME || "", "blur_env", "bin", "python3"),
+    join(process.env.BLUR_HOME || "", "blur_env-darwin-arm64", "bin", "python3"),
+  ].filter(Boolean);
+}
 function resolvePython() {
-  log("[python] Resolving Python executable...");
-  const prio = [
-    join(process.env.BLUR_HOME||"", "blur_env", "bin", "python3"),
-    join(process.env.BLUR_HOME||"", "blur_env-darwin-arm64", "bin", "python3"),
-    join(process.resourcesPath||"", "blur_env", "bin", "python3"),
-    join(process.resourcesPath||"", "blur_env-darwin-arm64", "bin", "python3"),
-  ];
-  for (const p of prio) { try { if (p && existsSync(p)) { log(`[python] found ${p}`); return p; } } catch {} }
-  log("[python] using system python3");
+  log("[python] Resolving Python executable…");
+  // In packaged apps: require embedded python
+  if (app.isPackaged) {
+    for (const p of embeddedPythonCandidates()) {
+      try { if (p && existsSync(p)) { log(`[python] embedded found ${p}`); return p; } } catch {}
+    }
+    // hard stop: not standalone if missing
+    const msg = "Embedded Python not found in app bundle (Resources/blur_env).";
+    log("[python] FATAL:", msg);
+    model_status = { status: "error", message: msg };
+    return null;
+  }
+  // dev: allow system python
+  for (const p of embeddedPythonCandidates()) { try { if (p && existsSync(p)) { log(`[python] embedded found ${p}`); return p; } } catch {} }
+  log("[python] dev mode using system python3");
   return "python3";
 }
 
 /* ============================================================================
-   AI CORE SPAWN + READINESS
+   AI CORE
 ============================================================================ */
 function buildUvicornArgs(backendDir, useFastLoop = true) {
   const moduleSpec = resolveCoreModule(backendDir);
@@ -349,8 +351,9 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
   if (!cfgOK) { broadcastStatus(); return; }
   const backendDir = findBackendDir();
   const pythonCommand = resolvePython();
-  const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
+  if (!pythonCommand) { broadcastStatus(); return; } // fail loudly in packaged
 
+  const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
   const threads = String(process.env.BLAS_THREADS || process.env.OPENBLAS_NUM_THREADS || 4);
 
   log("[main] Starting AI Core…");
@@ -419,20 +422,8 @@ function stopAIServer() {
 }
 
 /* ============================================================================
-   NET PING & UI
+   UI / SPLASH
 ============================================================================ */
-function ping(urlStr) { return new Promise((resolve, reject) => {
-  try {
-    const lib = urlStr.startsWith("https:") ? https : http;
-    const req = lib.get(urlStr, { timeout: 1200 }, (res) => {
-      const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
-      res.resume(); ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
-    });
-    req.on("error", reject);
-    req.on("timeout", () => req.destroy(new Error("timeout")));
-  } catch (e) { reject(e); }
-});}
-async function isCoreHealthy() { try { return await ping(CORE_HEALTH); } catch { return false; } }
 function escapeForHtml(s = "") { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/`/g,"\\`"); }
 function splashHTML(msg = "initiating…") {
   const safe = escapeForHtml(msg);
@@ -443,8 +434,8 @@ function splashHTML(msg = "initiating…") {
   .content{text-align:center}
   .dim{color:#aaa}.ok{color:#9efc9e}.warn{color:#ffd27a}.err{color:#ff8c8c}
   .logo{font-size:22px;margin-bottom:10px}
-  .loader-bar{position:relative;width:220px;height:6px;background:rgba(218, 112, 214, .15);border-radius:6px;margin:18px auto 0;overflow:hidden}
-  .loader-fill{position:absolute;inset:0;background:linear-gradient(90deg, #da70d633, #da70d688, #da70d633);animation:glow 1.2s ease-in-out infinite}
+  .loader-bar{position:relative;width:220px;height:6px;background:rgba(218,112,214,.15);border-radius:6px;margin:18px auto 0;overflow:hidden}
+  .loader-fill{position:absolute;inset:0;background:linear-gradient(90deg,#da70d633,#da70d688,#da70d633);animation:glow 1.2s ease-in-out infinite}
   @keyframes glow{0%{transform:translateX(-100%)}50%{transform:translateX(0%)}100%{transform:translateX(100%)}}
   </style></head><body><div class="wrap">
     <div class="content">
@@ -482,26 +473,19 @@ function ensureOverlay(win) {
   const js = `(()=>{try{var o=document.getElementById('__blur_overlay');if(!o){o=document.createElement('div');o.id='__blur_overlay';o.style.cssText='position:fixed;left:8px;top:8px;z-index:2147483647;background:rgba(0,0,0,.65);color:#fff;padding:6px 8px;border-radius:6px;font:12px Menlo,monospace;pointer-events:none;display:none;';document.body.appendChild(o);}window.__blurSetOverlay=function(t){try{o.style.display='block';o.textContent=t;}catch(e){}};}catch(e){}})();`;
   win.webContents.executeJavaScript(js).catch(()=>{});
 }
-function setOverlayText(win, txt) {
-  if (!SHOW_OVERLAY || !win || win.isDestroyed()) return;
-  const safe = JSON.stringify(String(txt || ""));
-  win.webContents.executeJavaScript(`window.__blurSetOverlay && window.__blurSetOverlay(${safe})`).catch(()=>{});
-}
 function broadcastStatus() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("ai-status-update", model_status);
   }
-  // mirror to splash if still visible
   const cls = model_status.status === "ready" ? "ok" : model_status.status === "degraded" ? "warn" : "dim";
   updateSplash(model_status.message || "", cls);
 }
 
 /* ============================================================================
-   WINDOW CREATE
+   WINDOW
 ============================================================================ */
 async function createWindow() {
   const backgroundThrottling = false;
-  
   mainWindow = new BrowserWindow({
     width: 1560, height: 1040, title: "Blur", backgroundColor: "#000000", show: false,
     webPreferences: {
@@ -513,12 +497,10 @@ async function createWindow() {
       spellcheck: false
     },
   });
-  
   try { app.dock?.show(); } catch {}
 
   mainWindow.webContents.on("console-message", (_e, level, message) => log(`[renderer:L${level}] ${message}`));
-  mainWindow.webContents.on("did-finish-load", () => { log("[nav] finished"); ensureOverlay(mainWindow); bootMark("renderer finished load"); });
-  
+  mainWindow.webContents.on("did-finish-load", () => { ensureOverlay(mainWindow); bootMark("renderer finished load"); });
   mainWindow.webContents.once("dom-ready", () => {
     closeSplash();
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
@@ -531,6 +513,7 @@ async function createWindow() {
     await mainWindow.loadURL(DEV_URL).catch(e => log("[dev] loadURL error:", e));
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
+    // prefer app.asar/dist, fallback to Resources/dist
     try { await mainWindow.loadFile(join(process.resourcesPath, "app.asar", "dist", "index.html")); }
     catch { await mainWindow.loadFile(join(process.resourcesPath, "dist", "index.html")); }
   }
@@ -540,25 +523,41 @@ async function createWindow() {
 }
 
 /* ============================================================================
-   IPC: core info
+   NET / HEALTH
+============================================================================ */
+function ping(urlStr) { return new Promise((resolve, reject) => {
+  try {
+    const lib = urlStr.startsWith("https:") ? https : http;
+    const req = lib.get(urlStr, { timeout: 1200 }, (res) => {
+      const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
+      res.resume(); ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+  } catch (e) { reject(e); }
+});}
+async function isCoreHealthy() { try { return await ping(CORE_HEALTH); } catch { return false; } }
+
+/* ============================================================================
+   IPC
 ============================================================================ */
 ipcMain.handle("core:getInfo", () => ({ ready: !!aiReady, status: model_status }));
 ipcMain.handle("core:healthz", async () => ({ ok: await isCoreHealthy(), status: model_status }));
 
 /* ============================================================================
-   POWER/SLEEP HOOKS
+   POWER
 ============================================================================ */
-const flushRendererNow = () => {
+function flushRendererNow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    log("[power] requesting flush from renderer (suspend/lock)");
+    log("[power] requesting flush from renderer");
     mainWindow.webContents.send("main-process-quitting");
   }
-};
-powerMonitor.on("suspend", () => { log("[power] suspend detected"); flushRendererNow(); });
-powerMonitor.on("lock-screen", () => { log("[power] lock-screen detected"); flushRendererNow(); });
+}
+powerMonitor.on("suspend", () => { flushRendererNow(); });
+powerMonitor.on("lock-screen", () => { flushRendererNow(); });
 
 /* ============================================================================
-   SINGLE INSTANCE & LIFECYCLE
+   BOOT
 ============================================================================ */
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
@@ -569,14 +568,18 @@ else {
     initLogger(); bootMark("logger ready");
     log(`[startup] userData = ${app.getPath("userData")}`);
     showSplash(model_status.message);
+
+    // resource prep in parallel with window boot
     const ensureP = (async () => { await ensureBlurHomeAndUnpack(); bootMark("resources ensured"); })();
     initPrefsIPC(); bootMark("prefs ready");
     await createWindow(); bootMark("window created & loading");
     await ensureP;
+
     const cfgOK = requireConfigOrFail();
     if (cfgOK) {
       startAIServer();
       model_status = { status: "starting", message: "initializing AI Core…" }; broadcastStatus();
+
       (async () => {
         const started = Date.now();
         while (Date.now() - started < 60000) {
@@ -585,7 +588,9 @@ else {
           }
           await new Promise(r => setTimeout(r, 1200));
         }
-        if (model_status.status === "starting") { model_status = { status: "degraded", message: "AI Core startup timeout." }; broadcastStatus(); }
+        if (model_status.status === "starting") {
+          model_status = { status: "degraded", message: "AI Core startup timeout." }; broadcastStatus();
+        }
       })();
     } else {
       broadcastStatus();
@@ -594,7 +599,7 @@ else {
 }
 
 /* ============================================================================
-   ROBUST SHUTDOWN
+   QUIT
 ============================================================================ */
 function cleanQuit() {
   if (isQuitting) return; isQuitting = true;
@@ -603,16 +608,14 @@ function cleanQuit() {
     mainWindow.webContents.send("main-process-quitting");
     setTimeout(() => {
       if (isNonEmptyThreads(finalThreadsPayload)) { log("[quit] Saving final threads state…"); writeThreadsFileAtomic(finalThreadsPayload); }
-      else { log("[quit] No final payload; preserving existing threads file if any."); }
       stopAIServer(); app.quit();
     }, 400);
     return;
   }
   stopAIServer(); app.quit();
 }
-app.on("before-quit", (e) => { log("[quit] 'before-quit' triggered."); if (!isQuitting) { e.preventDefault(); cleanQuit(); } });
+app.on("before-quit", (e) => { if (!isQuitting) { e.preventDefault(); cleanQuit(); } });
 app.on("window-all-closed", () => { if (!isMac) cleanQuit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 process.on("uncaughtException", (err) => log("[uncaughtException]", err?.stack || String(err)));
 process.on("unhandledRejection", (reason) => log("[unhandledRejection]", reason?.stack || String(reason)));
-
