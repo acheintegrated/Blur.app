@@ -358,7 +358,7 @@ const AppContent: React.FC = () => {
             const last = msgs[msgs.length - 1];
             if (!last || last.sender !== "Blur") return t;
             const dots = ".".repeat(dot);
-            msgs[msgs.length - 1] = { ...last, text: `typing${dots.padEnd(3, " ")}` };
+            msgs[msgs.length - 1] = { ...last, text: `𓆩typing𓆪${dots.padEnd(3, " ")}` };
             return { ...t, messages: msgs };
           })
         );

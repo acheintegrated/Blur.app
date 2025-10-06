@@ -1,10 +1,12 @@
-// electron/main.mjs — REFORGED v11.2 (Launch & Resource Optimizations)
-// - PERF: Enabled GPU acceleration by default in production.
-// - PERF: Relaxed Python math library thread limits to improve performance.
-// - FIX: Correctly sets BLUR_HOME to the in-repo 'resources' directory for development.
-// - FIX: Prefers using the in-bundle resources in packaged apps to eliminate slow first-run file copying and reduce I/O.
-// - FIX: Improved bundle-finding logic to be case-insensitive ('Blur' vs 'blur').
-import { app, BrowserWindow, shell, ipcMain, globalShortcut, powerMonitor } from "electron";
+// electron/main.mjs — REFORGED v11.7 (Final Polish)
+// - SPLASH: "Blur." is bolded, "initiating..." is lowercase, and loading bar is a magenta/lilac gradient.
+// - PERF: Disabled background throttling & spellcheck, enabled aggressive rasterization, shows window on first paint.
+// - INSTANT FEEL: Dedicated splash window; no more black gap.
+// - FAST-BOOT: Window loads immediately; heavy seeding + AI boot run in parallel.
+// - PATH HYGIENE: Dev uses ./resources, packaged apps prefer in-bundle resources, copy only on version bump.
+// - CONTROLS: BLUR_DISABLE_GPU=1, BLUR_NO_FASTLOOP=1, BLUR_SKIP_VERSION_COPY=1, etc.
+
+import { app, BrowserWindow, shell, ipcMain, powerMonitor } from "electron";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import path, { dirname, join, resolve, basename } from "path";
@@ -20,30 +22,30 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 /* ============================================================================
-   FLAGS
+   FLAGS & PERF SWITCHES
 ============================================================================ */
-// ✅ PATCH A-1: Use GPU in prod; only disable for debugging.
 if (process.env.BLUR_DISABLE_GPU === "1") app.disableHardwareAcceleration();
-
 app.commandLine.appendSwitch("allow-running-insecure-content");
 app.commandLine.appendSwitch("disable-features", "OutOfBlinkCors");
+app.commandLine.appendSwitch("enable-features", "CanvasOopRasterization,PartialSwap");
 
 const SHOW_OVERLAY = !!process.env.BLUR_DEBUG_OVERLAY;
+const isMac = process.platform === "darwin";
 
 /* ============================================================================
    GLOBALS
 ============================================================================ */
 let aiProc = null;
 let mainWindow = null;
+let splashWindow = null;
 let aiReady = false;
 let logFile = null;
-let model_status = { status: "loading", message: "Initializing…" };
-
+let model_status = { status: "loading", message: "initiating…" }; // Lowercase default
 let isQuitting = false;
 let lastRendererFinalAt = 0;
 
 const CORE_PORT = String(process.env.BLUR_CORE_PORT || "8000");
-const CORE_HOST = "127.0.0.1";
+const CORE_HOST = process.env.BLUR_CORE_HOST || "127.0.0.1";
 const CORE_BASE = `http://${CORE_HOST}:${CORE_PORT}`;
 const CORE_HEALTH = `${CORE_BASE}/healthz`;
 
@@ -57,14 +59,13 @@ app.setName(APP_NAME);
 const appDataRoot = app.getPath("appData");
 const canonicalUserData = join(appDataRoot, APP_NAME);
 app.setPath("userData", canonicalUserData);
-
-try {
-  if (!existsSync(canonicalUserData)) mkdirSync(canonicalUserData, { recursive: true });
-} catch {}
+try { if (!existsSync(canonicalUserData)) mkdirSync(canonicalUserData, { recursive: true }); } catch {}
 
 /* ============================================================================
    LOGGER
 ============================================================================ */
+const t0 = Date.now();
+const bootMark = (label) => { const ms = ((Date.now() - t0)/1000).toFixed(2); log(`[boot-timing] +${ms}s ${label}`); };
 const initLogger = () => {
   try {
     const logDir = join(app.getPath("userData"), "logs");
@@ -84,21 +85,15 @@ const log = (...args) => {
 ============================================================================ */
 function homeBlurPath() { return resolve(os.homedir(), "blur"); }
 function packagedBlurPath() { return join(app.getPath("appData"), APP_NAME, "blur"); }
-
-// ✅ PATCH B-2: Fix the Resources/Blur vs resources/blur mismatch
 function getBundledBlurRoot() {
   const res = process.resourcesPath || join(__dirname, "..");
-  const cands = [
-    join(res, "Blur"),     // afterPack puts payload here
-    join(res, "blur"),     // legacy
-  ];
+  const cands = [ join(res, "Blur"), join(res, "blur") ];
   for (const c of cands) { if (existsSync(c)) return c; }
   return null;
 }
 function statSafe(p) { try { return statSync(p); } catch { return null; } }
 function cpRecursive(src, dst) {
-  const st = statSafe(src);
-  if (!st) return;
+  const st = statSafe(src); if (!st) return;
   if (st.isDirectory()) {
     mkdirSync(dst, { recursive: true });
     for (const name of readdirSync(src)) cpRecursive(join(src, name), join(dst, name));
@@ -109,21 +104,18 @@ function cpRecursive(src, dst) {
 }
 function rmrf(p) {
   try {
-    const st = statSafe(p);
-    if (!st) return;
-    if (st.isDirectory()) {
-      for (const f of readdirSync(p)) rmrf(join(p, f));
-      fs.rmdirSync(p);
-    } else fs.unlinkSync(p);
+    const st = statSafe(p); if (!st) return;
+    if (st.isDirectory()) { for (const f of readdirSync(p)) rmrf(join(p, f)); fs.rmdirSync(p); }
+    else fs.unlinkSync(p);
   } catch {}
 }
-function readYamlVersion(yamlText = "") {
-  const m = yamlText.match(/^\s*version:\s*['"]?([^'"\n]+)['"]?/mi);
+function readYamlVersion(text = "") {
+  const m = text.match(/\bversion:\s*['"]?([^'"\n]+)['"]?/i);
   return (m && m[1] && m[1].trim()) || "";
 }
 
 async function ensureBlurHomeAndUnpack() {
-  // ✅ PATCH B-1: Dev BLUR_HOME should point to your repo’s ./resources
+  // DEV: Prefer repo ./resources as BLUR_HOME so dev survives nuked App Support
   if (!app.isPackaged) {
     const devRoot = resolve(app.getAppPath(), "resources");
     if (existsSync(devRoot)) {
@@ -134,119 +126,87 @@ async function ensureBlurHomeAndUnpack() {
     }
   }
 
-  const envSet = !!process.env.BLUR_HOME;
+  const envSet = !!(process.env.BLUR_HOME && process.env.BLUR_HOME.trim());
   const homePath = homeBlurPath();
   const homeExists = existsSync(homePath);
 
-  // ✅ PATCH B-2: Set BLUR_HOME correctly for packaged apps
   if (!envSet) {
     const bundledRoot = getBundledBlurRoot();
     if (app.isPackaged && bundledRoot) {
-      process.env.BLUR_HOME = bundledRoot;
+      process.env.BLUR_HOME = bundledRoot; // bundle-first
     } else {
       process.env.BLUR_HOME = homeExists ? homePath : (app.isPackaged ? packagedBlurPath() : homePath);
     }
   }
+
   const BLUR_HOME = process.env.BLUR_HOME;
   mkdirSync(BLUR_HOME, { recursive: true });
-
   log(`[resources] Using BLUR_HOME: ${BLUR_HOME}`);
-  
-  const modelsPath = join(process.env.BLUR_HOME, "models");
+
   try {
+    const modelsPath = join(BLUR_HOME, "models");
     mkdirSync(modelsPath, { recursive: true });
     writeFileSync(join(modelsPath, ".metadata_never_index"), "");
-    log("[resources] Disabled Spotlight on models directory.");
   } catch {}
 
-  const bundledRoot = getBundledBlurRoot(); // Re-get for the check below
-  // ✅ PATCH B-3: Gate the copy logic
-  if (app.isPackaged && bundledRoot && BLUR_HOME !== bundledRoot && BLUR_HOME !== homePath) {
-    const srcCfg = join(bundledRoot, "config.yaml");
-    const dstCfg = join(BLUR_HOME, "config.yaml");
+  const bundledRoot = getBundledBlurRoot();
+  const skipCopy = process.env.BLUR_SKIP_VERSION_COPY === "1";
+  if (!skipCopy && bundledRoot && BLUR_HOME !== bundledRoot) {
+    const filesCopyIfMissing = ["config.yaml", "acheflip.yaml"];
+    const dirsReplaceOnBump = ["core"]; // immutable payloads per version
 
     let needsCopy = false;
     try {
-      const srcText = existsSync(srcCfg) ? readFileSync(srcCfg, "utf8") : "";
-      const dstText = existsSync(dstCfg) ? readFileSync(dstCfg, "utf8") : "";
-      const vSrc = readYamlVersion(srcText);
-      const vDst = readYamlVersion(dstText);
+      const srcCfg = join(bundledRoot, "config.yaml");
+      const dstCfg = join(BLUR_HOME, "config.yaml");
+      const vSrc = existsSync(srcCfg) ? readYamlVersion(readFileSync(srcCfg, "utf8")) : "";
+      const vDst = existsSync(dstCfg) ? readYamlVersion(readFileSync(dstCfg, "utf8")) : "";
       needsCopy = !existsSync(dstCfg) || (!!vSrc && vSrc !== vDst);
-      log(`[resources] bundled→appData version check: src=${vSrc || "?"} dst=${vDst || "?"} needsCopy=${needsCopy}`);
-    } catch (e) {
-      log("[resources] version compare failed:", String(e?.message || e));
-    }
-    
-    if (needsCopy) {
-      const filesCopyIfMissing = ["config.yaml", "acheflip.yaml"];
-      // ✅ PATCH B-5: On version bump, replace core/ wholesale
-      const dirsReplaceAlways = [ "core" ];
+      log(`[resources] bundled→home version check: src=${vSrc||"?"} dst=${vDst||"?"} needsCopy=${needsCopy}`);
+    } catch (e) { log("[resources] version compare failed:", String(e?.message || e)); }
 
+    if (needsCopy) {
       for (const rel of filesCopyIfMissing) {
         const src = join(bundledRoot, rel);
         const dst = join(BLUR_HOME, rel);
         try {
           if (!existsSync(src)) continue;
-          if (!existsSync(dst)) {
-            mkdirSync(path.dirname(dst), { recursive: true });
-            copyFileSync(src, dst);
-            log(`[resources] copied (new) ${rel}`);
-          } else {
-            log(`[resources] kept user ${rel}`);
-          }
-        } catch (e) {
-          log(`[resources] copy error for ${rel}: ${String(e?.message || e)}`);
-        }
+          if (!existsSync(dst)) { mkdirSync(path.dirname(dst), { recursive: true }); copyFileSync(src, dst); log(`[resources] copied (new) ${rel}`); }
+          else { log(`[resources] kept user ${rel}`); }
+        } catch (e) { log(`[resources] copy error for ${rel}: ${String(e?.message || e)}`); }
       }
-
-      for (const rel of dirsReplaceAlways) {
+      for (const rel of dirsReplaceOnBump) {
         const src = join(bundledRoot, rel);
         const dst = join(BLUR_HOME, rel);
-        try {
-          if (!existsSync(src)) continue;
-          rmrf(dst);
-          cpRecursive(src, dst);
-          log(`[resources] replaced dir ${rel}`);
-        } catch (e) {
-          log(`[resources] dir copy error for ${rel}: ${String(e?.message || e)}`);
-        }
+        try { if (existsSync(src)) { rmrf(dst); cpRecursive(src, dst); log(`[resources] replaced dir ${rel}`); } }
+        catch (e) { log(`[resources] dir copy error for ${rel}: ${String(e?.message || e)}`); }
       }
     }
 
-    const modelsDst = join(BLUR_HOME, "models");
-    const modelsSentinel = join(modelsDst, ".copied_ok");
-    try {
-      if (!existsSync(modelsSentinel)) {
-        const src = join(bundledRoot, "models");
-        if (existsSync(src)) {
-          rmrf(modelsDst);
-          cpRecursive(src, modelsDst);
-          writeFileSync(modelsSentinel, String(Date.now()));
-          log("[resources] Copied models (first-time seed).");
-        }
-      } else {
-        log("[resources] Models directory present, skipping heavy copy.");
-      }
-    } catch (e) {
-      log("[resources] Models copy error:", String(e?.message || e));
+    // One-time models seed with sentinel
+    if (process.env.BLUR_SKIP_SEED_MODELS !== "1") {
+      try {
+        const modelsDst = join(BLUR_HOME, "models");
+        const modelsSentinel = join(modelsDst, ".copied_ok");
+        if (!existsSync(modelsSentinel)) {
+          const src = join(bundledRoot, "models");
+          if (existsSync(src)) {
+            rmrf(modelsDst); cpRecursive(src, modelsDst); writeFileSync(modelsSentinel, String(Date.now()));
+            log("[resources] Copied models (first-time seed).");
+          }
+        } else { log("[resources] Models directory present, skipping heavy copy."); }
+      } catch (e) { log("[resources] Models copy error:", String(e?.message || e)); }
     }
   }
 
-  const BLUR_BIN = join(BLUR_HOME, "core", "bin");
-  const prevPath = process.env.PATH || "";
-  if (!prevPath.split(path.delimiter).includes(BLUR_BIN) && existsSync(BLUR_BIN)) {
-    process.env.PATH = [BLUR_BIN, prevPath].filter(Boolean).join(path.delimiter);
-  }
-
-  if (!process.env.BLUR_CONFIG_PATH) {
-    const userCfg = join(BLUR_HOME, "config.yaml");
-    if (existsSync(userCfg)) process.env.BLUR_CONFIG_PATH = userCfg;
-  }
-
+  // Export useful env for children
   process.env.BLUR_RESOURCES_DIR = process.resourcesPath || "";
   process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
+  if (!process.env.BLUR_CONFIG_PATH) {
+    const cfg = join(BLUR_HOME, "config.yaml");
+    if (existsSync(cfg)) process.env.BLUR_CONFIG_PATH = cfg;
+  }
 }
-
 
 /* ============================================================================
    CONFIG DISCOVERY
@@ -255,14 +215,8 @@ function requireConfigOrFail() {
   const envPath = process.env.BLUR_CONFIG_PATH;
   const home = process.env.BLUR_HOME;
   const homeCfg = home && join(home, "config.yaml");
-
-  const candidates = [
-    envPath && existsSync(envPath) ? envPath : null,
-    homeCfg && existsSync(homeCfg) ? homeCfg : null,
-  ].filter(Boolean);
-
+  const candidates = [ envPath, homeCfg ].filter(p => p && existsSync(p));
   const cfg = candidates[0] || null;
-
   if (!cfg) {
     const msg = `Missing config.yaml. Set BLUR_CONFIG_PATH or place it in BLUR_HOME (${home || 'not set'}).`;
     log(`[config] FATAL: ${msg}`);
@@ -304,21 +258,11 @@ function initPrefsIPC() {
 const THREADS_FILE = join(app.getPath("userData"), "threads.v1.json");
 const THREADS_TMP  = join(app.getPath("userData"), "threads.v1.json.tmp");
 const THREADS_BAK  = join(app.getPath("userData"), "threads.v1.json.bak");
-
-function isNonEmptyThreads(arr) {
-  return Array.isArray(arr) && arr.some(t => t && t.messages && t.messages.length);
-}
-
+function isNonEmptyThreads(arr) { return Array.isArray(arr) && arr.some(t => t && t.messages && t.messages.length); }
 function writeThreadsFileAtomic(arr) {
   const empty = !Array.isArray(arr) || arr.length === 0;
   if (empty) {
-    try {
-      if (existsSync(THREADS_FILE)) fs.unlinkSync(THREADS_FILE);
-      if (existsSync(THREADS_BAK)) fs.unlinkSync(THREADS_BAK);
-      log("[threads] deleted all threads — files removed.");
-    } catch (e) {
-      log("[threads] delete error:", e?.message || e);
-    }
+    try { if (existsSync(THREADS_FILE)) fs.unlinkSync(THREADS_FILE); if (existsSync(THREADS_BAK)) fs.unlinkSync(THREADS_BAK); log("[threads] deleted all threads — files removed."); } catch (e) { log("[threads] delete error:", e?.message || e); }
     return true;
   }
   const data = JSON.stringify(arr, null, 2);
@@ -334,28 +278,15 @@ function writeThreadsFileAtomic(arr) {
     return false;
   }
 }
-
 ipcMain.handle("threads:load", () => {
-  try {
-    if (!existsSync(THREADS_FILE)) return [];
-    return JSON.parse(readFileSync(THREADS_FILE, "utf8"));
-  } catch (e) {
-    log("[threads] read failed, trying .bak:", e?.message || e);
-    try { if (existsSync(THREADS_BAK)) return JSON.parse(readFileSync(THREADS_BAK, "utf8")); } catch {}
-    return [];
-  }
+  try { if (!existsSync(THREADS_FILE)) return []; return JSON.parse(readFileSync(THREADS_FILE, "utf8")); }
+  catch (e) { log("[threads] read failed, trying .bak:", e?.message || e); try { if (existsSync(THREADS_BAK)) return JSON.parse(readFileSync(THREADS_BAK, "utf8")); } catch {} return []; }
 });
 ipcMain.handle("threads:save", (_e, payload) => writeThreadsFileAtomic(payload));
-
 let finalThreadsPayload = null;
 ipcMain.handle("threads:send-final-state-for-quit", (_e, payload) => {
-  if (isNonEmptyThreads(payload)) {
-    finalThreadsPayload = payload;
-    lastRendererFinalAt = Date.now();
-    log("[quit] final threads payload received:", payload.length, "threads");
-  } else {
-    log("[quit] ignored final payload (empty)");
-  }
+  if (isNonEmptyThreads(payload)) { finalThreadsPayload = payload; lastRendererFinalAt = Date.now(); log("[quit] final threads payload received:", payload.length, "threads"); }
+  else { log("[quit] ignored final payload (empty)"); }
 });
 
 /* ============================================================================
@@ -366,7 +297,7 @@ function looksLikeBackendDir(p) {
     if (!p || !existsSync(p)) return false;
     const st = statSafe(p); if (!st.isDirectory()) return false;
     const files = readdirSync(p);
-    return ["convo_chat_core.py", "core_server.py", "core.py", "server.py", "app.py"].some(f => files.includes(f));
+    return ["convo_chat_core.py","core_server.py","core.py","server.py","app.py"].some(f => files.includes(f));
   } catch { return false; }
 }
 function findBackendDir() {
@@ -386,18 +317,19 @@ function findBackendDir() {
   return fallbackDir;
 }
 function resolveCoreModule(backendDir) {
-  const order = ["convo_chat_core.py", "core_server.py", "core.py", "server.py", "app.py"];
+  const order = ["convo_chat_core.py","core_server.py","core.py","server.py","app.py"];
   for (const name of order) { if (existsSync(join(backendDir, name))) return `${basename(name, ".py")}:app`; }
   return "convo_chat_core:app";
 }
 function resolvePython() {
   log("[python] Resolving Python executable...");
-  const priority = [
-    join(process.env.BLUR_HOME, "blur_env-darwin-arm64", "bin", "python3"),
-    join(process.resourcesPath || "", "blur_env", "bin", "python3"),
-    join(process.resourcesPath || "", "blur_env-darwin-arm64", "bin", "python3"),
+  const prio = [
+    join(process.env.BLUR_HOME||"", "blur_env", "bin", "python3"),
+    join(process.env.BLUR_HOME||"", "blur_env-darwin-arm64", "bin", "python3"),
+    join(process.resourcesPath||"", "blur_env", "bin", "python3"),
+    join(process.resourcesPath||"", "blur_env-darwin-arm64", "bin", "python3"),
   ];
-  for (const p of priority) { if (existsSync(p)) { log(`[python] found ${p}`); return p; } }
+  for (const p of prio) { try { if (p && existsSync(p)) { log(`[python] found ${p}`); return p; } } catch {} }
   log("[python] using system python3");
   return "python3";
 }
@@ -407,17 +339,20 @@ function resolvePython() {
 ============================================================================ */
 function buildUvicornArgs(backendDir, useFastLoop = true) {
   const moduleSpec = resolveCoreModule(backendDir);
-  const base = ["-m", "uvicorn", moduleSpec, "--host", CORE_HOST, "--port", CORE_PORT, "--log-level", process.env.BLUR_CORE_LOG || "info"];
-  if (useFastLoop) base.push("--loop", "uvloop", "--http", "httptools");
+  const base = ["-m","uvicorn", moduleSpec, "--host", CORE_HOST, "--port", CORE_PORT, "--log-level", process.env.BLUR_CORE_LOG || "info"];
+  if (useFastLoop) base.push("--loop","uvloop","--http","httptools");
   return base;
 }
-function startAIServer(useFastLoop = true) {
+function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? false : true)) {
   if (aiProc) { log("[main] AI Core start ignored: already running."); return; }
   const cfgOK = requireConfigOrFail();
   if (!cfgOK) { broadcastStatus(); return; }
   const backendDir = findBackendDir();
   const pythonCommand = resolvePython();
   const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
+
+  const threads = String(process.env.BLAS_THREADS || process.env.OPENBLAS_NUM_THREADS || 4);
+
   log("[main] Starting AI Core…");
   log("--- [AI Core Launch Details] ---");
   log(`[exec]  ${pythonCommand}`);
@@ -426,35 +361,34 @@ function startAIServer(useFastLoop = true) {
   log(`[env]   BLUR_HOME=${process.env.BLUR_HOME}`);
   log(`[env]   BLUR_CONFIG_PATH=${process.env.BLUR_CONFIG_PATH}`);
   log("--------------------------------");
+
   aiProc = spawn(pythonCommand, uvicornArgs, {
-    cwd: backendDir, stdio: ["ignore", "pipe", "pipe"],
+    cwd: backendDir,
+    stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
       PYTHONUNBUFFERED: "1",
       PYTHONPATH: [backendDir, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
       BLUR_CORE_PORT: CORE_PORT,
-      // ✅ PATCH A-2: Let backends breathe.
       KMP_DUPLICATE_LIB_OK: "TRUE",
-      OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || "4",
-      VECLIB_MAXIMUM_THREADS: process.env.VECLIB_MAXIMUM_THREADS || "4",
-      OPENBLAS_NUM_THREADS: process.env.OPENBLAS_NUM_THREADS || "4",
-      GOTO_NUM_THREADS: process.env.GOTO_NUM_THREADS || "4",
-      MKL_NUM_THREADS: process.env.MKL_NUM_THREADS || "4",
+      OMP_NUM_THREADS: threads,
+      VECLIB_MAXIMUM_THREADS: threads,
+      OPENBLAS_NUM_THREADS: threads,
+      GOTO_NUM_THREADS: threads,
+      MKL_NUM_THREADS: threads,
     },
     detached: process.platform !== "win32",
   });
+
   aiProc.on("error", (err) => {
     log("--- [CRITICAL AI CORE SPAWN ERROR] ---", String(err?.stack||err?.message||err));
-    aiReady=false;
-    model_status={status:"error",message:"Fatal: Failed to start AI Core. Check main.log."};
-    broadcastStatus();
+    aiReady=false; model_status={status:"error",message:"Fatal: Failed to start AI Core. Check main.log."}; broadcastStatus();
   });
   aiProc.stderr.on("data", (d) => {
     const line=String(d).trim();
     log(`[AI Core STDERR]: ${line}`);
     if(/bad interpreter/i.test(line)){
-      log("[main] Python venv broken."); stopAIServer(); aiReady=false;
-      model_status={status:"error",message:"Fatal: Python environment is broken."}; broadcastStatus();
+      log("[main] Python venv broken."); stopAIServer(); aiReady=false; model_status={status:"error",message:"Fatal: Python environment is broken."}; broadcastStatus();
     }
     if(/(No module named 'uvloop'|No module named 'httptools')/i.test(line)&&useFastLoop){
       log("[main] Missing uvloop/httptools — restarting without fast loop…");
@@ -490,7 +424,7 @@ function stopAIServer() {
 function ping(urlStr) { return new Promise((resolve, reject) => {
   try {
     const lib = urlStr.startsWith("https:") ? https : http;
-    const req = lib.get(urlStr, { timeout: 1500 }, (res) => {
+    const req = lib.get(urlStr, { timeout: 1200 }, (res) => {
       const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
       res.resume(); ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
     });
@@ -498,14 +432,9 @@ function ping(urlStr) { return new Promise((resolve, reject) => {
     req.on("timeout", () => req.destroy(new Error("timeout")));
   } catch (e) { reject(e); }
 });}
-
-async function isCoreHealthy() {
-  try { return await ping(CORE_HEALTH); } catch { return false; }
-}
-
-function escapeForHtml(s = "") { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/`/g,"\\`");}
-
-function splashHTML(msg = "Initializing…") {
+async function isCoreHealthy() { try { return await ping(CORE_HEALTH); } catch { return false; } }
+function escapeForHtml(s = "") { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/`/g,"\\`"); }
+function splashHTML(msg = "initiating…") {
   const safe = escapeForHtml(msg);
   return `<!doctype html><html><head><meta charset="utf-8"/><title>Blur</title><style>
   html,body{height:100%;margin:0;background:#000;color:#fff}
@@ -513,46 +442,44 @@ function splashHTML(msg = "Initializing…") {
   .wrap{display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column}
   .content{text-align:center}
   .dim{color:#aaa}.ok{color:#9efc9e}.warn{color:#ffd27a}.err{color:#ff8c8c}
-  
-  @keyframes load { 0% { width: 0%; } 100% { width: 100%; } }
-  @keyframes pulse {
-    0% { box-shadow: 0 0 5px #00e5ff, 0 0 10px #00e5ff; }
-    50% { box-shadow: 0 0 15px #00e5ff, 0 0 25px #00e5ff; }
-    100% { box-shadow: 0 0 5px #00e5ff, 0 0 10px #00e5ff; }
-  }
-  .loader-bar {
-    width: 200px;
-    height: 4px;
-    background-color: rgba(0, 229, 255, 0.15);
-    border-radius: 4px;
-    margin: 20px auto 0 auto;
-    overflow: hidden;
-  }
-  .loader-bar-inner {
-    height: 100%;
-    width: 100%;
-    background-color: #00e5ff;
-    border-radius: 4px;
-    animation: load 60s linear infinite, pulse 1.5s ease-in-out infinite;
-  }
+  .logo{font-size:22px;margin-bottom:10px}
+  .loader-bar{position:relative;width:220px;height:6px;background:rgba(218, 112, 214, .15);border-radius:6px;margin:18px auto 0;overflow:hidden}
+  .loader-fill{position:absolute;inset:0;background:linear-gradient(90deg, #da70d633, #da70d688, #da70d633);animation:glow 1.2s ease-in-out infinite}
+  @keyframes glow{0%{transform:translateX(-100%)}50%{transform:translateX(0%)}100%{transform:translateX(100%)}}
   </style></head><body><div class="wrap">
     <div class="content">
-      <div class="mono" style="font-size:22px;margin-bottom:10px">Blur</div>
+      <div class="mono logo"><b>Blur.</b></div>
       <div id="status" class="mono dim" style="font-size:13px">${safe}</div>
     </div>
-    <div class="loader-bar"><div class="loader-bar-inner"></div></div>
+    <div class="loader-bar"><div class="loader-fill"></div></div>
   </div></body></html>`;
 }
-
-async function loadSplash(win, msg) {
-  const dataUrl = "data:text/html;charset=utf-8," + encodeURIComponent(splashHTML(msg));
-  try { await win.loadURL(dataUrl); } catch {}
+function showSplash(initialMsg = model_status.message) {
+  if (splashWindow && !splashWindow.isDestroyed()) return;
+  splashWindow = new BrowserWindow({
+    width: 420, height: 220, resizable: false, fullscreenable: false, frame: false,
+    show: true, backgroundColor: "#000000", title: "Blur — booting",
+    webPreferences: { backgroundThrottling: false }
+  });
+  const dataUrl = "data:text/html;charset=utf-8," + encodeURIComponent(splashHTML(initialMsg));
+  splashWindow.loadURL(dataUrl).catch(()=>{});
+  splashWindow.on("closed", () => { splashWindow = null; });
 }
+function updateSplash(msg, cls="dim") {
+  try {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      const safe = escapeForHtml(String(msg||""));
+      splashWindow.webContents.executeJavaScript(
+        `(function(){var e=document.getElementById('status'); if(e){e.className='mono ${cls}'; e.textContent='${safe}';}})();`
+      ).catch(()=>{});
+    }
+  } catch {}
+}
+function closeSplash() { try { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.close(); } catch {} }
+
 function ensureOverlay(win) {
   if (!SHOW_OVERLAY) return;
-  const js = `(function(){try{var o=document.getElementById('__blur_overlay');if(!o){o=document.createElement('div');o.id='__blur_overlay';o.style.cssText='position:fixed;left:8px;top:8px;z-index:2147483647;background:rgba(0,0,0,.65);color:#fff;padding:6px 8px;border-radius:6px;font:12px Menlo,monospace;pointer-events:none;display:none;';document.body.appendChild(o);}
-window.__blurSetOverlay=function(t){try{o.style.display='block';o.textContent=t;}catch(e){}};
-}catch(e){}})();`;
+  const js = `(()=>{try{var o=document.getElementById('__blur_overlay');if(!o){o=document.createElement('div');o.id='__blur_overlay';o.style.cssText='position:fixed;left:8px;top:8px;z-index:2147483647;background:rgba(0,0,0,.65);color:#fff;padding:6px 8px;border-radius:6px;font:12px Menlo,monospace;pointer-events:none;display:none;';document.body.appendChild(o);}window.__blurSetOverlay=function(t){try{o.style.display='block';o.textContent=t;}catch(e){}};}catch(e){}})();`;
   win.webContents.executeJavaScript(js).catch(()=>{});
 }
 function setOverlayText(win, txt) {
@@ -563,36 +490,49 @@ function setOverlayText(win, txt) {
 function broadcastStatus() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("ai-status-update", model_status);
-    const cls = model_status.status === "ready" ? "ok" : model_status.status === "degraded" ? "warn" : "err";
-    const safeMsg = escapeForHtml(model_status.message || "");
-    mainWindow.webContents.executeJavaScript(`(function(){var e=document.getElementById('status');if(e){e.className='mono ${cls}';e.textContent='${safeMsg}';}})();`).catch(()=>{});
   }
+  // mirror to splash if still visible
+  const cls = model_status.status === "ready" ? "ok" : model_status.status === "degraded" ? "warn" : "dim";
+  updateSplash(model_status.message || "", cls);
 }
 
 /* ============================================================================
    WINDOW CREATE
 ============================================================================ */
 async function createWindow() {
+  const backgroundThrottling = false;
+  
   mainWindow = new BrowserWindow({
     width: 1560, height: 1040, title: "Blur", backgroundColor: "#000000", show: false,
     webPreferences: {
       preload: join(__dirname, "preload.mjs"),
-      contextIsolation: true, nodeIntegration: false, sandbox: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling,
+      spellcheck: false
     },
   });
-  mainWindow.on("ready-to-show", () => { mainWindow.show(); });
+  
   try { app.dock?.show(); } catch {}
 
   mainWindow.webContents.on("console-message", (_e, level, message) => log(`[renderer:L${level}] ${message}`));
-  mainWindow.webContents.on("did-finish-load", () => { log("[nav] finished"); ensureOverlay(mainWindow); });
+  mainWindow.webContents.on("did-finish-load", () => { log("[nav] finished"); ensureOverlay(mainWindow); bootMark("renderer finished load"); });
   
-  await loadSplash(mainWindow, model_status.message);
+  mainWindow.webContents.once("dom-ready", () => {
+    closeSplash();
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.showInactive();
+    }
+    bootMark("dom-ready");
+  });
 
   if (!app.isPackaged) {
     await mainWindow.loadURL(DEV_URL).catch(e => log("[dev] loadURL error:", e));
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
-    await mainWindow.loadFile(join(__dirname, "../dist/index.html")).catch(e => log("[main] loadFile error:", e));
+    try { await mainWindow.loadFile(join(process.resourcesPath, "app.asar", "dist", "index.html")); }
+    catch { await mainWindow.loadFile(join(process.resourcesPath, "dist", "index.html")); }
   }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: "deny" }; });
@@ -621,46 +561,34 @@ powerMonitor.on("lock-screen", () => { log("[power] lock-screen detected"); flus
    SINGLE INSTANCE & LIFECYCLE
 ============================================================================ */
 const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
-  app.quit();
-} else {
-  app.on("second-instance", () => {
-    if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
-  });
+if (!gotLock) { app.quit(); }
+else {
+  app.on("second-instance", () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
 
   app.whenReady().then(async () => {
-    initLogger();
+    initLogger(); bootMark("logger ready");
     log(`[startup] userData = ${app.getPath("userData")}`);
-    initPrefsIPC();
-    
-    await ensureBlurHomeAndUnpack();
-    await createWindow();
-    
+    showSplash(model_status.message);
+    const ensureP = (async () => { await ensureBlurHomeAndUnpack(); bootMark("resources ensured"); })();
+    initPrefsIPC(); bootMark("prefs ready");
+    await createWindow(); bootMark("window created & loading");
+    await ensureP;
     const cfgOK = requireConfigOrFail();
-
     if (cfgOK) {
-      startAIServer(true);
-      model_status = { status: "starting", message: "Initializing AI Core…" };
-      broadcastStatus();
-
+      startAIServer();
+      model_status = { status: "starting", message: "initializing AI Core…" }; broadcastStatus();
       (async () => {
         const started = Date.now();
         while (Date.now() - started < 60000) {
           if (await isCoreHealthy()) {
-            aiReady = true;
-            model_status = { status: "ready", message: "AI Core ready" };
-            broadcastStatus();
-            return;
+            aiReady = true; model_status = { status: "ready", message: "AI Core ready" }; broadcastStatus(); return;
           }
-          await new Promise(r => setTimeout(r, 2000));
+          await new Promise(r => setTimeout(r, 1200));
         }
-        if (model_status.status === "starting") {
-          model_status = { status: "degraded", message: "AI Core startup timeout." };
-          broadcastStatus();
-        }
+        if (model_status.status === "starting") { model_status = { status: "degraded", message: "AI Core startup timeout." }; broadcastStatus(); }
       })();
     } else {
-      broadcastStatus(); // Show the config error
+      broadcastStatus();
     }
   });
 }
@@ -668,37 +596,23 @@ if (!gotLock) {
 /* ============================================================================
    ROBUST SHUTDOWN
 ============================================================================ */
-const cleanQuit = () => {
-  if (isQuitting) return;
-  isQuitting = true;
-
+function cleanQuit() {
+  if (isQuitting) return; isQuitting = true;
   if (mainWindow && !mainWindow.isDestroyed()) {
     log("[quit] Requesting final state from renderer…");
     mainWindow.webContents.send("main-process-quitting");
-
     setTimeout(() => {
-      if (isNonEmptyThreads(finalThreadsPayload)) {
-        log("[quit] Saving final threads state…");
-        writeThreadsFileAtomic(finalThreadsPayload);
-      } else {
-        log("[quit] No final payload; preserving existing threads file if any.");
-      }
-      stopAIServer();
-      app.quit();
+      if (isNonEmptyThreads(finalThreadsPayload)) { log("[quit] Saving final threads state…"); writeThreadsFileAtomic(finalThreadsPayload); }
+      else { log("[quit] No final payload; preserving existing threads file if any."); }
+      stopAIServer(); app.quit();
     }, 400);
     return;
   }
-
-  stopAIServer();
-  app.quit();
-};
-
-app.on("before-quit", (e) => {
-  log("[quit] 'before-quit' triggered.");
-  if (!isQuitting) { e.preventDefault(); cleanQuit(); }
-});
-app.on("window-all-closed", () => { if (process.platform !== "darwin") cleanQuit(); });
+  stopAIServer(); app.quit();
+}
+app.on("before-quit", (e) => { log("[quit] 'before-quit' triggered."); if (!isQuitting) { e.preventDefault(); cleanQuit(); } });
+app.on("window-all-closed", () => { if (!isMac) cleanQuit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-
 process.on("uncaughtException", (err) => log("[uncaughtException]", err?.stack || String(err)));
 process.on("unhandledRejection", (reason) => log("[unhandledRejection]", reason?.stack || String(reason)));
+

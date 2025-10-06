@@ -9,6 +9,8 @@
 /build
 /release
 /out
+/models
+/dist
 
 # Log files
 *.log
@@ -25,6 +27,7 @@ resources/blur_env-darwin-arm64/
 resources/blur_env-darwin-x64/
 resources/core/.venv/
 resources/sessions/
+blur_env-darwin-arm64/
 
 # Llama Bin
 bin/

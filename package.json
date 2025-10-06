@@ -1,9 +1,10 @@
 {
-  "name": "blurface",
+  "name": "Blur",
   "version": "0.0.0",
   "description": "a desktop vessel for ache-integrated recursion, rendering nonlinear logic through local Electron and glyph-driven interfaces.",
   "main": "electron/main.mjs",
   "type": "module",
+
   "scripts": {
     "dev": "ELECTRON_ENABLE_LOGGING=1 ELECTRON_DISABLE_SECURITY_WARNINGS=1 concurrently --raw -n vite,electron \"vite --port 6969 --strictPort --host --clearScreen=false\" \"wait-on tcp:6969 && electron .\"",
     "electron": "electron .",
@@ -18,6 +19,7 @@
     "rebuild:native": "electron-rebuild -f -w sqlite3",
     "postinstall": "electron-rebuild -w sqlite3 || true"
   },
+
   "keywords": [
     "electron",
     "blur-effect",
@@ -30,29 +32,24 @@
   ],
   "author": "glyphi blur <blurred.eth@proton.me>",
   "license": "ISC",
+
   "build": {
-    "productName": "Blur",
     "appId": "com.blur.app",
-    "directories": {
-      "output": "release"
-    },
-    "artifactName": "Blur-v${version}-${os}-${arch}.${ext}",
+
     "asar": true,
     "asarUnpack": [
       "electron/backend/**"
     ],
+
     "files": [
       "dist/**",
       "electron/**",
-      "build/**",
-      "package.json",
-      "node_modules/**"
+      "main.mjs",
+      "preload.mjs",
+      "!**/*.map"
     ],
+
     "extraResources": [
-      {
-        "from": "config.base.yaml",
-        "to": "config.base.yaml"
-      },
       {
         "from": ".",
         "to": "blur",
@@ -75,77 +72,16 @@
         ]
       }
     ],
+
     "mac": {
+      "target": [ "dmg" ],
       "category": "public.app-category.productivity",
-      "target": [
-        "dmg"
-      ],
-      "artifactName": "Blur-v${version}-${arch}.dmg",
-      "icon": "build/icon.icns",
-      "hardenedRuntime": false,
-      "entitlements": "build/entitlements.plist",
-      "entitlementsInherit": "build/entitlements.plist",
-      "gatekeeperAssess": false
-    },
-    "dmg": {
-      "background": null,
-      "backgroundColor": "#000000",
-      "iconSize": 128,
-      "contents": [
-        {
-          "x": 130,
-          "y": 220,
-          "type": "file"
-        },
-        {
-          "x": 410,
-          "y": 220,
-          "type": "link",
-          "path": "/Applications"
-        }
-      ]
-    },
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "build/icon.ico",
-      "publisherName": "Blur",
-      "artifactName": "Blur-Setup-v${version}.exe"
-    },
-    "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Blur",
-      "deleteAppDataOnUninstall": false
-    },
-    "linux": {
-      "target": [
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "deb",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "category": "Utility",
-      "icon": "build/icons"
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     }
   },
+
   "devDependencies": {
     "@babel/plugin-transform-react-jsx": "^7.27.1",
     "@electron/notarize": "^2.3.0",
@@ -166,6 +102,7 @@
     "vite": "^7.1.1",
     "wait-on": "^8.0.4"
   },
+
   "dependencies": {
     "@electron/rebuild": "^4.0.1",
     "@tailwindcss/typography": "^0.5.19",
