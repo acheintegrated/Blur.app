@@ -1,6 +1,3 @@
-uvicorn[standard]
-fastapi
-PyYAML
-faiss-cpu
-llama-cpp-python
-sentence-transformers
+-r requirements-core.txt
+# Uncomment below if you’re doing HF retraining or RAG builds
+# -r requirements-hf.txt

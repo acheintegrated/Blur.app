@@ -1,9 +1,9 @@
-// electron/main.mjs — REFORGED v11.8 (Standalone & Self-Carrying)
-// - STANDALONE: Uses embedded blur_env + bundled Blur payload first; no system Python required in prod.
-// - SPLASH: Instant, glowing bar; no black gap.
-// - FAST-BOOT: Seeds userData only on version change; AI Core spawns in parallel.
-// - SAFETY: In packaged apps, refuses to start if embedded Python is missing.
-// - TOGGLES: BLUR_DISABLE_GPU=1, BLUR_NO_FASTLOOP=1, BLUR_SKIP_VERSION_COPY=1
+// electron/main.mjs — REFORGED v12.0 (True Standalone)
+// - PACKAGED-FIRST: BLUR_HOME defaults to Resources/ in prod; no "Blur/" subdir.
+// - PYTHON: Spawns embedded venv @ Resources/blur_env-darwin-arm64/bin/python3.
+// - CORE: Runs FastAPI via uvicorn from Resources/core (cwd=that dir).
+// - HEALTH: Clear logs + hard fail if embedded pieces are missing.
+// - PERF: Optional GPU clamp, thread clamps for math libs.
 
 import { app, BrowserWindow, shell, ipcMain, powerMonitor } from "electron";
 import { spawn } from "child_process";
@@ -79,12 +79,6 @@ const log = (...args) => {
 ============================================================================ */
 function homeBlurPath() { return resolve(os.homedir(), "blur"); }
 function packagedBlurPath() { return join(app.getPath("appData"), APP_NAME, "blur"); }
-function getBundledBlurRoot() {
-  const res = process.resourcesPath || join(__dirname, "..");
-  const cands = [ join(res, "Blur"), join(res, "blur") ];
-  for (const c of cands) { if (existsSync(c)) return c; }
-  return null;
-}
 function statSafe(p) { try { return statSync(p); } catch { return null; } }
 function cpRecursive(src, dst) {
   const st = statSafe(src); if (!st) return;
@@ -108,8 +102,13 @@ function readYamlVersion(text = "") {
   return (m && m[1] && m[1].trim()) || "";
 }
 
+/** In packaged builds, the bundle root IS process.resourcesPath */
+function getBundledRoot() {
+  return process.resourcesPath || join(__dirname, "..");
+}
+
 async function ensureBlurHomeAndUnpack() {
-  // DEV: prefer repo ./resources
+  // DEV: prefer repo ./resources if present
   if (!app.isPackaged) {
     const devRoot = resolve(app.getAppPath(), "resources");
     if (existsSync(devRoot)) { process.env.BLUR_HOME = devRoot; log(`[dev] BLUR_HOME = ${devRoot}`); }
@@ -121,12 +120,11 @@ async function ensureBlurHomeAndUnpack() {
   const homeExists = existsSync(homePath);
 
   if (!envSet) {
-    const bundledRoot = getBundledBlurRoot();
-    if (app.isPackaged && bundledRoot) {
-      // BUNDLE-FIRST in packaged apps
-      process.env.BLUR_HOME = bundledRoot;
+    if (app.isPackaged) {
+      // packaged-first: BLUR_HOME = Resources/
+      process.env.BLUR_HOME = getBundledRoot();
     } else {
-      process.env.BLUR_HOME = homeExists ? homePath : (app.isPackaged ? packagedBlurPath() : homePath);
+      process.env.BLUR_HOME = homeExists ? homePath : homePath;
     }
   }
 
@@ -134,15 +132,15 @@ async function ensureBlurHomeAndUnpack() {
   mkdirSync(BLUR_HOME, { recursive: true });
   log(`[resources] Using BLUR_HOME: ${BLUR_HOME}`);
 
-  // keep Spotlight quiet
+  // keep Spotlight quiet on models
   try {
     const modelsPath = join(BLUR_HOME, "models");
     mkdirSync(modelsPath, { recursive: true });
     writeFileSync(join(modelsPath, ".metadata_never_index"), "");
   } catch {}
 
-  // Seed only when not pointing directly at the bundle
-  const bundledRoot = getBundledBlurRoot();
+  // Seed only when BLUR_HOME != bundle root
+  const bundledRoot = getBundledRoot();
   const skipCopy = process.env.BLUR_SKIP_VERSION_COPY === "1";
   if (!skipCopy && bundledRoot && BLUR_HOME !== bundledRoot) {
     const filesCopyIfMissing = ["config.yaml", "acheflip.yaml"];
@@ -196,7 +194,7 @@ async function ensureBlurHomeAndUnpack() {
   process.env.BLUR_RESOURCES_DIR = process.resourcesPath || "";
   process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
   if (!process.env.BLUR_CONFIG_PATH) {
-    const cfg = join(BLUR_HOME, "config.yaml");
+    const cfg = join(process.env.BLUR_HOME, "config.yaml");
     if (existsSync(cfg)) process.env.BLUR_CONFIG_PATH = cfg;
   }
 }
@@ -277,7 +275,7 @@ ipcMain.handle("threads:send-final-state-for-quit", (_e, payload) => {
 });
 
 /* ============================================================================
-   BACKEND / PYTHON
+   BACKEND / PYTHON (packaged-first)
 ============================================================================ */
 function looksLikeBackendDir(p) {
   try {
@@ -288,49 +286,48 @@ function looksLikeBackendDir(p) {
   } catch { return false; }
 }
 function findBackendDir() {
+  // Highest priority: packaged Resources/core
+  const packagedCore = join(process.resourcesPath || "", "core");
   const candidates = [
+    packagedCore,
+    join(process.env.BLUR_HOME || "", "core"),
+    // dev fallbacks
     join(process.cwd(),"electron","backend"),
     join(__dirname,"backend"),
     join(__dirname,"..","electron","backend"),
     join(app.getAppPath(),"electron","backend"),
-    join(process.resourcesPath||"","app.asar.unpacked","electron","backend"),
-    join(process.resourcesPath||"","electron","backend"),
-    resolve(process.env.BLUR_HOME,"electron","backend"),
-    resolve(process.env.BLUR_HOME,"backend"),
+    join(process.resourcesPath||"","app.asar.unpacked","electron","backend")
   ];
   for (const c of candidates) { if (looksLikeBackendDir(c)) { log(`[backend] Found backend directory at: ${c}`); return c; } }
-  const fallbackDir = join(process.cwd(), "electron", "backend");
-  log(`[backend] Warning: Could not find backend directory, falling back to: ${fallbackDir}`);
-  return fallbackDir;
+  log(`[backend] FATAL: could not locate a backend dir (tried: ${candidates.join(" , ")})`);
+  return null;
 }
 function resolveCoreModule(backendDir) {
   const order = ["convo_chat_core.py","core_server.py","core.py","server.py","app.py"];
   for (const name of order) { if (existsSync(join(backendDir, name))) return `${basename(name, ".py")}:app`; }
-  return "convo_chat_core:app";
+  return null;
 }
 function embeddedPythonCandidates() {
   const r = process.resourcesPath || "";
+  const home = process.env.BLUR_HOME || "";
   return [
-    join(r, "blur_env", "bin", "python3"),
     join(r, "blur_env-darwin-arm64", "bin", "python3"),
-    join(process.env.BLUR_HOME || "", "blur_env", "bin", "python3"),
-    join(process.env.BLUR_HOME || "", "blur_env-darwin-arm64", "bin", "python3"),
-  ].filter(Boolean);
+    join(r, "blur_env", "bin", "python3"),
+    join(home, "blur_env-darwin-arm64", "bin", "python3"),
+    join(home, "blur_env", "bin", "python3"),
+  ];
 }
 function resolvePython() {
   log("[python] Resolving Python executable…");
-  // In packaged apps: require embedded python
   if (app.isPackaged) {
     for (const p of embeddedPythonCandidates()) {
       try { if (p && existsSync(p)) { log(`[python] embedded found ${p}`); return p; } } catch {}
     }
-    // hard stop: not standalone if missing
-    const msg = "Embedded Python not found in app bundle (Resources/blur_env).";
+    const msg = "Embedded Python not found in app bundle (Resources/blur_env-darwin-arm64).";
     log("[python] FATAL:", msg);
     model_status = { status: "error", message: msg };
     return null;
   }
-  // dev: allow system python
   for (const p of embeddedPythonCandidates()) { try { if (p && existsSync(p)) { log(`[python] embedded found ${p}`); return p; } } catch {} }
   log("[python] dev mode using system python3");
   return "python3";
@@ -341,6 +338,7 @@ function resolvePython() {
 ============================================================================ */
 function buildUvicornArgs(backendDir, useFastLoop = true) {
   const moduleSpec = resolveCoreModule(backendDir);
+  if (!moduleSpec) return null;
   const base = ["-m","uvicorn", moduleSpec, "--host", CORE_HOST, "--port", CORE_PORT, "--log-level", process.env.BLUR_CORE_LOG || "info"];
   if (useFastLoop) base.push("--loop","uvloop","--http","httptools");
   return base;
@@ -349,12 +347,17 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
   if (aiProc) { log("[main] AI Core start ignored: already running."); return; }
   const cfgOK = requireConfigOrFail();
   if (!cfgOK) { broadcastStatus(); return; }
+
   const backendDir = findBackendDir();
+  if (!backendDir) { model_status = {status:"error", message:"Backend dir not found."}; broadcastStatus(); return; }
+
   const pythonCommand = resolvePython();
-  if (!pythonCommand) { broadcastStatus(); return; } // fail loudly in packaged
+  if (!pythonCommand) { broadcastStatus(); return; }
 
   const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
-  const threads = String(process.env.BLAS_THREADS || process.env.OPENBLAS_NUM_THREADS || 4);
+  if (!uvicornArgs) { model_status = {status:"error", message:"No core module found to launch."}; broadcastStatus(); return; }
+
+  const threads = String(process.env.BLAS_THREADS || process.env.OPENBLAS_NUM_THREADS || 1);
 
   log("[main] Starting AI Core…");
   log("--- [AI Core Launch Details] ---");
@@ -370,7 +373,14 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      // ensure venv takes precedence
+      VIRTUAL_ENV: join(process.resourcesPath || "", "blur_env-darwin-arm64"),
+      PATH: [
+        join(process.resourcesPath || "", "blur_env-darwin-arm64", "bin"),
+        process.env.PATH || ""
+      ].join(path.delimiter),
       PYTHONUNBUFFERED: "1",
+      PYTHONHOME: "",
       PYTHONPATH: [backendDir, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
       BLUR_CORE_PORT: CORE_PORT,
       KMP_DUPLICATE_LIB_OK: "TRUE",
