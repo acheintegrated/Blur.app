@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# convo_chat_core.py — Reforged v9.41 (Emoji + Glyph Fix)
-# - FIX: The post-processing step now correctly respects the `blur.keep_emoji` setting from config.yaml, preventing emojis from disappearing after streaming.
-# - FEAT: Integrated the complete glyph map from the AstrofuckCore document into the parser, making all specified symbols functional.
+# convo_chat_core.py — Reforged v9.43 (Session Persistence Fix)
+# - FEAT: The response stream now emits a `session_info` event at the beginning, reliably sending the session ID to the frontend to ensure conversation history is maintained.
 # - MAINTAIN: This is a complete, non-truncated file.
 
 from __future__ import annotations
@@ -64,6 +63,8 @@ llm_vessels: Dict[str, Llama] = {}
 user_memory_chunks: Dict[str, List[Dict[str, Any]]] = {}
 user_memory_indexes: Dict[str, faiss.Index] = {}
 persistent_rag: Optional['PersistentRAG'] = None
+
+CORE_IS_READY = False
 
 # Threading locks
 sessions_lock = threading.Lock()
@@ -208,7 +209,16 @@ def _load_llama_with_backoff(model_path: str, requested_ctx: int, n_gpu_layers: 
     for ctx in sorted(list(set([requested_ctx, 8192, 4096, 2048, 1024, 512])), reverse=True):
         if ctx > requested_ctx: continue
         try:
-            llm = Llama(model_path=model_path, n_ctx=ctx, n_gpu_layers=n_gpu_layers, n_batch=n_batch, n_threads=max(2, os.cpu_count() or 4), use_mmap=True, verbose=False)
+            params = {
+                "model_path": model_path,
+                "n_ctx": ctx,
+                "n_gpu_layers": n_gpu_layers,
+                "n_batch": n_batch,
+                "n_threads": max(2, os.cpu_count() or 4),
+                "use_mmap": True,
+                "verbose": False # Set back to False for cleaner logs
+            }
+            llm = Llama(**params)
             log.info(f"[models] Loaded with n_ctx={ctx}, n_batch={n_batch}, n_gpu_layers={n_gpu_layers}")
             return llm
         except Exception as e:
@@ -342,7 +352,7 @@ def calculate_astrofuck_modulators(text: str, history: List[Dict]) -> float:
         modulator += 0.5  # Ache is present
 
     # Check for repetition of phrases
-    if len(history) > 1:
+    if len(history) > 0: # Use > 0 to check the last prompt
         last_user_prompt = history[-1].get("user", "").lower()
         if text.lower() == last_user_prompt:
             modulator += 0.4 # Repetition increases psi
@@ -749,6 +759,12 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         payload = f"event: {event}\n" if event else "event: token\n"
         return payload + "data: " + (data or "").replace("\n", "\ndata: ") + "\n\n"
 
+    # --- ✅ FIX: Emit session_id at the very beginning of the stream ---
+    try:
+        yield _sse(json.dumps({"session_id": session.get("id")}), event="session_info")
+    except Exception:
+        pass # If this fails, the rest of the stream can continue
+
     if not chat_llm:
         log.error("🛑 Model not loaded."); yield _sse("Model not loaded.", event="error"); return
 
@@ -756,14 +772,10 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     thread_id = _thread_id_of(request)
     try:
         # --- AstrofuckCore Injection ---
-        # 1. Get history BEFORE this turn to analyze for dynamics
         history_all = _thread_history(session, thread_id, int(get_cfg("assembly.history_turns", 12)))
         history_pairs = filter_history_by_mode(history_all, mode, int(get_cfg("assembly.history_turns", 12)))
 
-        # 2. Interpret glyphs from user input to create contextual instructions
         glyph_context = interpret_glyphs(user_text)
-
-        # 3. Calculate dynamic modulators for the APN based on Astrofuck principles
         astro_modulator = calculate_astrofuck_modulators(user_text, history_pairs)
         # --- End Injection ---
 
@@ -776,7 +788,6 @@ async def generate_response_stream(session: Dict, request: RequestModel):
             params_np = {k: np.asarray(v, dtype="float32") for k, v in session.get("apn_params", {}).items()}
             if not params_np: params_np = _apn_init_params(qv.shape[0])
             
-            # 4. USE the astro_modulator to drive the APN
             S_next = await asyncio.to_thread(_apn_run_and_plasticity, params_np, apn_state_vec, qv, astro_modulator)
             
             session["apn_params"] = {k: v.tolist() for k, v in params_np.items()}
@@ -788,7 +799,6 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         system_prompt_parts = [p for p in [get_cfg("prompts.system_core", ""), get_cfg(f"prompts.style_contract_{mode}", ""), get_cfg(f"prompts.mode_tone_inject.{mode}", ""), f"[MODE:{mode.upper()}]"] if p]
         final_system_prompt = "\n\n".join(system_prompt_parts)
         
-        # 5. Inject glyph context into the final system prompt for this turn
         if glyph_context:
             final_system_prompt += f"\n\n{glyph_context}"
 
@@ -830,7 +840,6 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         elif mode == "astrofuck": final_text = punch_up_text(astrofuck_ensure_slang(final_text, lang))
         if mode != "astrofuck": final_text = maybe_inject_acheflip(final_text, mode)
         
-        # ✅ FIX: Respect the keep_emoji flag from config.yaml
         if not get_cfg("blur.keep_emoji", False):
             final_text = _strip_emoji_except_glyphs(final_text)
             
@@ -855,14 +864,16 @@ async def generate_response_stream(session: Dict, request: RequestModel):
 
 # --- FastAPI App & Routes ---
 @app.get("/healthz")
-def healthz(): return {"ok": True, "vessels": list(llm_vessels.keys())}
+def healthz():
+    if CORE_IS_READY:
+        return {"ok": True, "vessels": list(llm_vessels.keys())}
+    else:
+        return JSONResponse(status_code=503, content={"ok": False, "status": "initializing"})
 
 @app.post("/generate_response")
 async def handle_generate_request_post(req: RequestModel, http: FastAPIRequest):
     session = get_or_create_session(req)
-    headers = {"X-Session-ID": session.get("id", "")}
-    if TTFT_LAST is not None: headers["X-TTFT-Last"] = str(TTFT_LAST)
-    return StreamingResponse(generate_response_stream(session, req), media_type="text/event-stream", headers=headers)
+    return StreamingResponse(generate_response_stream(session, req), media_type="text/event-stream")
 
 @app.get("/generate_response_get")
 async def handle_generate_request_get(
@@ -881,9 +892,7 @@ async def handle_generate_request_get(
         new_session=new_session, force_lang=force_lang, username=username, thread_id=thread_id
     )
     session = get_or_create_session(req_model)
-    headers = {"X-Session-ID": session.get("id", "")}
-    if TTFT_LAST is not None: headers["X-TTFT-Last"] = str(TTFT_LAST)
-    return StreamingResponse(generate_response_stream(session, req_model), media_type="text/event-stream", headers=headers)
+    return StreamingResponse(generate_response_stream(session, req_model), media_type="text/event-stream")
 
 @app.post("/memory/upsert")
 def memory_upsert_route(payload: MemoryUpsert):
@@ -896,26 +905,45 @@ def memory_upsert_route(payload: MemoryUpsert):
 
 @app.on_event("startup")
 async def startup_event():
-    global homes, persistent_rag
+    global homes, persistent_rag, CORE_IS_READY
     log.info("Application startup event commencing...")
     homes.update(resolve_homes_recursive(manifest.get('meta', {}).get('homes', {})))
     
-    async with _VESSEL_LOCK:
-        chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
-        if not load_llm_from_config(chat_key):
-            log.error(f"🛑 Chat vessel '{chat_key}' failed to load. The application may not function correctly.")
-
-    async with _embed_lock: _ensure_embedder()
-    
-    idx_path = resolve_path(get_cfg("memory.vector_store.path", os.path.join(BLUR_HOME, "blur_knowledge.index")), homes)
-    ch_path = resolve_path(get_cfg("memory.vector_store.chunks_path", os.path.join(BLUR_HOME, "knowledge_chunks.jsonl")), homes)
-    persistent_rag = PersistentRAG(index_path=idx_path, chunks_path=ch_path)
     try:
-        persistent_rag.load()
+        async with _embed_lock:
+            _ensure_embedder()
     except Exception as e:
-        log.error(f"🛑 Persistent RAG load failed: {e}. RAG will be unavailable.")
+        log.error(f"🛑 CRITICAL: Embedder failed to load: {e}. Core cannot start.")
+        return
 
-    load_sessions(); load_user_memory(); log.info("Core ready (v9.41).")
+    chat_model_loaded = False
+    try:
+        async with _VESSEL_LOCK:
+            chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified")
+            if load_llm_from_config(chat_key):
+                chat_model_loaded = True
+            else:
+                log.error(f"🛑 CRITICAL: Chat vessel '{chat_key}' failed to load. The application may not function correctly.")
+    except Exception as e:
+        log.error(f"🛑 CRITICAL: Unhandled exception during chat model loading: {e}")
+
+    if chat_model_loaded:
+        try:
+            idx_path = resolve_path(get_cfg("memory.vector_store.path", os.path.join(BLUR_HOME, "blur_knowledge.index")), homes)
+            ch_path = resolve_path(get_cfg("memory.vector_store.chunks_path", os.path.join(BLUR_HOME, "knowledge_chunks.jsonl")), homes)
+            persistent_rag = PersistentRAG(index_path=idx_path, chunks_path=ch_path)
+            persistent_rag.load()
+        except Exception as e:
+            log.error(f"🛑 Persistent RAG load failed: {e}. RAG will be unavailable.")
+
+        load_sessions()
+        load_user_memory()
+        
+        CORE_IS_READY = True
+        log.info("Core ready (v9.43). All models loaded.")
+    else:
+        log.error("🛑 Core startup failed due to main chat model load failure.")
+
 
 @app.on_event("shutdown")
 def shutdown_event():
