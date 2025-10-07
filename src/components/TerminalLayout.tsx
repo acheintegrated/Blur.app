@@ -1,5 +1,5 @@
 // /opt/blurface/src/components/TerminalLayout.tsx
-// REFORGED v4.0 — Stop-Wired + Pulse Injector + Coalesced Mode Switch
+// REFORGED v4.1 — Stop-Wired + CursorGlow + Coalesced Mode Switch
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './SideBar';
@@ -7,6 +7,7 @@ import { MainContent } from './MainContent';
 import { CommandInput } from './CommandInput';
 import { Settings } from './Settings';
 import { ContextMenu } from './ContextMenu';
+import { CursorGlow } from './CursorGlow';
 
 interface Message {
   sender: 'Blur' | 'You' | 'System';
@@ -50,7 +51,7 @@ interface TerminalLayoutProps {
   onModeToggle: () => void;
 
   connectionStatus: ConnectionStatus;
-  onStopGeneration: () => void;   // <- parent abort/stop
+  onStopGeneration: () => void;
   isLoading: boolean;
 
   onThreadContextMenu?: (e: React.MouseEvent, id: string) => void;
@@ -104,58 +105,60 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   const activeThread = threadList.find((t) => t.id === activeItem);
   const currentMessages = activeThread?.messages || [];
 
-// CUT marker on last assistant msg — always end with exactly one █ (no ▍)
-const markLastAssistantCut = useCallback(() => {
-  if (!activeItem) return;
-  const BLOCK = '█';
-  const STREAM_TAIL = /[▍█\s]+$/u; // strip trailing stream cursor ▍, existing █, and whitespace
+  // CUT marker on last assistant msg — always end with exactly one █ (no ▍)
+  const markLastAssistantCut = useCallback(() => {
+    if (!activeItem) return;
+    const BLOCK = '█';
+    const STREAM_TAIL = /[▍█\s]+$/u;
 
-  setThreadList(prev => {
-    const idx = prev.findIndex(t => t.id === activeItem);
-    if (idx === -1) return prev;
-    const t = prev[idx];
-    if (!t.messages.length) return prev;
+    setThreadList(prev => {
+      const idx = prev.findIndex(t => t.id === activeItem);
+      if (idx === -1) return prev;
+      const t = prev[idx];
+      if (!t.messages.length) return prev;
 
-    const last = t.messages[t.messages.length - 1];
-    if (last.sender !== 'Blur') return prev;
+      const last = t.messages[t.messages.length - 1];
+      if (last.sender !== 'Blur') return prev;
 
-    const lastText = (last.text ?? '');
-    const cleaned = lastText.replace(STREAM_TAIL, ''); // remove ▍/█/spaces at end
-    const updated = [...t.messages];
-    updated[updated.length - 1] = { ...last, text: cleaned + BLOCK };
+      const lastText = (last.text ?? '');
+      const cleaned = lastText.replace(STREAM_TAIL, '');
+      const updated = [...t.messages];
+      updated[updated.length - 1] = { ...last, text: cleaned + BLOCK };
 
-    const next = [...prev];
-    next[idx] = { ...t, messages: updated };
-    return next;
-  });
-}, [activeItem, setThreadList]);
+      const next = [...prev];
+      next[idx] = { ...t, messages: updated };
+      return next;
+    });
+  }, [activeItem, setThreadList]);
 
-  /* ===================== SEND (never gate on activeItem) ===================== */
+  /* SEND (never gate on activeItem) */
   const handleNewCommandLocal = (command: string) => {
-    if (isSwitchingMode) return; // block only during hard mode switch
+    if (isSwitchingMode) return;
     onNewCommand(command, activeItem || undefined);
   };
 
-  /* ===================== STOP (wire to CommandInput) ===================== */
+  /* STOP (wired into CommandInput) */
   const handleStopLocal = React.useCallback(() => {
     try { markLastAssistantCut(); } catch {}
     try { onStopGeneration(); } catch {}
     try { window.dispatchEvent(new CustomEvent('blur:stop')); } catch {}
   }, [onStopGeneration, markLastAssistantCut]);
 
-  /* ===================== UI helpers ===================== */
+  /* UI helpers */
   const toggleSidebar = () => setSidebarCollapsed(!sidebarCollapsed);
   const openSettings = () => setShowSettings(true);
   const closeSettings = () => setShowSettings(false);
 
-  /* ===================== Mode switch visuals ===================== */
+  /* Mode switch visuals */
   const endSwitchVisual = useCallback(() => {
     const elapsed = Date.now() - switchStartAt.current;
     const remain = Math.max(0, MIN_INDICATOR_MS - elapsed);
     window.setTimeout(() => setIsSwitchingMode(false), remain);
   }, []);
 
-  useEffect(() => { if (isSwitchingMode && connectionStatus === 'ready') endSwitchVisual(); }, [connectionStatus, isSwitchingMode, endSwitchVisual]);
+  useEffect(() => {
+    if (isSwitchingMode && connectionStatus === 'ready') endSwitchVisual();
+  }, [connectionStatus, isSwitchingMode, endSwitchVisual]);
 
   useEffect(() => {
     if (!isSwitchingMode) return;
@@ -198,7 +201,7 @@ const markLastAssistantCut = useCallback(() => {
     }
   }, [isSwitchingMode, requestModeSwitch]);
 
-  /* ===================== Resizer ===================== */
+  /* Resizer */
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (!isResizing.current) return;
     const minWidth = 220;
@@ -231,14 +234,14 @@ const markLastAssistantCut = useCallback(() => {
     };
   }, [handleMouseMove, handleMouseUp]);
 
-  /* ===================== Stream tick for MainContent ===================== */
+  /* Stream tick for MainContent */
   useEffect(() => {
     const onChunk = () => setStreamingToken((t) => t + 1);
     window.addEventListener('blur:stream-chunk', onChunk as EventListener);
     return () => window.removeEventListener('blur:stream-chunk', onChunk as EventListener);
   }, []);
 
-  /* ===================== Context menu ===================== */
+  /* Context menu */
   const handleThreadContextMenu = useCallback((e: React.MouseEvent, id: string) => {
     e.preventDefault();
     if (id !== activeItem) setActiveItem(id);
@@ -294,7 +297,7 @@ const markLastAssistantCut = useCallback(() => {
     closeMenu();
   };
 
-  /* ===================== Small UI bits ===================== */
+  /* Small UI bits */
   const ModeShimmer = () => (
     <div className="absolute inset-x-0 top-[57px] h-[2px] overflow-hidden">
       <div className={`${isSwitchingMode ? 'animate-[shimmer_1.2s_linear_infinite]' : 'opacity-0'} h-full w-full bg-gradient-to-r from-transparent via-white/70 to-transparent`} />
@@ -314,16 +317,19 @@ const markLastAssistantCut = useCallback(() => {
     onNewConversation();
   }, [isLoading, onStopGeneration, onNewConversation, markLastAssistantCut]);
 
-  /* ===================== Render ===================== */
+  /* Render */
   return (
     <div className="flex flex-col h-full bg-black relative">
+      {/* CursorGlow — stronger while streaming */}
+      <CursorGlow isEmphatic={isLoading} />
+
       {/* Inject pulse keyframes/class in case globals didn’t compile them */}
       <style id="stop-pulse-inject">{`
-        @keyframes pulse-scale-slow-fixed { 0%,100% { transform: scale(1);} 50% { transform: scale(1.10);} }
+        @keyframes pulse-scale-slow-fixed { 0%,100% { transform: scale(1);} 50% { transform: scale(1.12);} }
         .anim-stop-glow-pulse {
           display:inline-block !important;
           will-change: text-shadow, transform;
-          animation: neon-dynamic-glow 6s linear infinite, pulse-scale-slow-fixed 2.6s ease-in-out infinite !important;
+          animation: neon-dynamic-glow 6s linear infinite, pulse-scale-slow-fixed 2.8s ease-in-out infinite !important;
           text-shadow: 0 0 5px rgba(242,0,242,.9), 0 0 10px rgba(242,0,242,.8), 0 0 20px rgba(242,0,242,.7);
         }
       `}</style>

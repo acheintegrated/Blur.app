@@ -492,3 +492,60 @@ body {
   max-height: min(200px, calc(100vh - 16px));
   overflow: hidden;
 }
+
+/*----------------------------------------
+/* root container follows mouse; clicks pass through */
+.cursor-glow {
+  position: fixed;
+  left: 0; top: 0;
+  width: 0; height: 0;
+  pointer-events: none;
+  z-index: 2147483647;
+  mix-blend-mode: screen; /* optional: juicy neon look on dark bg */
+}
+
+/* visible “dot” centered on pointer */
+.cursor-core {
+  position: absolute;
+  left: -8px; top: -8px;       /* center a 16px dot on pointer */
+  width: 16px; height: 16px;
+  border-radius: 9999px;
+  background: rgba(255,255,255,0.9);
+  box-shadow:
+    0 0 8px rgba(255,255,255,0.9),
+    0 0 20px rgba(170, 60, 255, 0.8),
+    0 0 40px rgba(0, 190, 255, 0.65),
+    0 0 70px rgba(0, 255, 200, 0.45);
+
+  /* glow cycle + pulse */
+  animation:
+    neon-dynamic-glow 8s linear infinite,
+    cursor-pulse 1.9s ease-in-out infinite;
+  will-change: transform, box-shadow, filter;
+}
+
+/* bigger pulse when isEmphatic=true (e.g., while generating) */
+.cursor-glow--emph .cursor-core {
+  animation:
+    neon-dynamic-glow 8s linear infinite,
+    cursor-pulse-strong 1.6s ease-in-out infinite;
+}
+
+/* respects reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .cursor-core { animation: none; }
+}
+
+/* mild pulse */
+@keyframes cursor-pulse {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50%      { transform: scale(1.25); filter: brightness(1.2); }
+}
+
+/* stronger pulse */
+@keyframes cursor-pulse-strong {
+  0%, 100% { transform: scale(1.1); filter: brightness(1.05); }
+  50%      { transform: scale(1.45); filter: brightness(1.25); }
+}
+
+.cursor-glow.is-down .cursor-core { transform: scale(0.85) !important; }
