@@ -1,15 +1,11 @@
 // /opt/blurface/src/components/TerminalLayout.tsx
-// REFORGED v3.9 — Voidless Send + Coalesced Mode Switch + Context Menu
-// - SEND: Never block on missing activeItem. Forward thread hint; App will create/focus.
-// - UI: keeps shimmer/spinner, CUT marker, context menu, safe delete/rename.
-// - API: onNewCommand(message, threadId?) optional param supported.
+// REFORGED v4.0 — Stop-Wired + Pulse Injector + Coalesced Mode Switch
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './SideBar';
 import { MainContent } from './MainContent';
 import { CommandInput } from './CommandInput';
 import { Settings } from './Settings';
-import { XIcon } from 'lucide-react';
 import { ContextMenu } from './ContextMenu';
 
 interface Message {
@@ -17,7 +13,6 @@ interface Message {
   text: string;
   systemType?: 'announcement' | 'normal';
 }
-
 interface Thread {
   id: string;
   title: string;
@@ -26,7 +21,6 @@ interface Thread {
   sessionId?: string | null;
 }
 
-/* ---------------- Types ---------------- */
 interface ContextMenuState {
   visible: boolean;
   x: number;
@@ -34,13 +28,11 @@ interface ContextMenuState {
   itemId: string;
   itemType: 'thread';
 }
-
 interface RenameState {
   isRenaming: boolean;
   itemId: string;
   newName: string;
 }
-
 type Mode = 'dream' | 'astrofuck';
 type ConnectionStatus = 'initializing' | 'connecting' | 'loading_model' | 'ready' | 'error';
 
@@ -50,20 +42,17 @@ interface TerminalLayoutProps {
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (collapsed: boolean) => void;
   threadList: Thread[];
-  // Note: parent keeps the React.SetStateAction; here we accept simple setter for compatibility
   setThreadList: (threads: Thread[]) => void;
 
-  // ⬇️ accepts optional thread hint — App will create/focus if needed
   onNewCommand: (command: string, threadIdHint?: string) => void;
-
   onNewConversation: () => void;
   currentMode: Mode;
   onModeToggle: () => void;
+
   connectionStatus: ConnectionStatus;
-  onStopGeneration: () => void;
+  onStopGeneration: () => void;   // <- parent abort/stop
   isLoading: boolean;
 
-  // rename/context hooks (unchanged)
   onThreadContextMenu?: (e: React.MouseEvent, id: string) => void;
   renameState: RenameState;
   renameInputRef: React.RefObject<HTMLInputElement>;
@@ -103,7 +92,7 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
 
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
 
-  // mode switching state
+  // mode switching
   const [isSwitchingMode, setIsSwitchingMode] = useState(false);
   const queuedSwitch = useRef(false);
   const switchStartAt = useRef<number>(0);
@@ -115,34 +104,46 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   const activeThread = threadList.find((t) => t.id === activeItem);
   const currentMessages = activeThread?.messages || [];
 
-  // CUT marker on last assistant msg
-  const markLastAssistantCut = useCallback(() => {
-    if (!activeItem) return;
-    const BLOCK = '█';
-    setThreadList(prev => {
-      const idx = prev.findIndex(t => t.id === activeItem);
-      if (idx === -1) return prev;
-      const t = prev[idx];
-      if (!t.messages.length) return prev;
-      const last = t.messages[t.messages.length - 1];
-      if (last.sender !== 'Blur') return prev;
-      const lastText = (last.text ?? '');
-      if (lastText.trimEnd().endsWith(BLOCK)) return prev;
-      const updated = [...t.messages];
-      updated[updated.length - 1] = { ...last, text: lastText + BLOCK };
-      const next = [...prev];
-      next[idx] = { ...t, messages: updated };
-      return next;
-    });
-  }, [activeItem, setThreadList]);
+// CUT marker on last assistant msg — always end with exactly one █ (no ▍)
+const markLastAssistantCut = useCallback(() => {
+  if (!activeItem) return;
+  const BLOCK = '█';
+  const STREAM_TAIL = /[▍█\s]+$/u; // strip trailing stream cursor ▍, existing █, and whitespace
 
-  /* ===================== SEND: never gate on activeItem ===================== */
+  setThreadList(prev => {
+    const idx = prev.findIndex(t => t.id === activeItem);
+    if (idx === -1) return prev;
+    const t = prev[idx];
+    if (!t.messages.length) return prev;
+
+    const last = t.messages[t.messages.length - 1];
+    if (last.sender !== 'Blur') return prev;
+
+    const lastText = (last.text ?? '');
+    const cleaned = lastText.replace(STREAM_TAIL, ''); // remove ▍/█/spaces at end
+    const updated = [...t.messages];
+    updated[updated.length - 1] = { ...last, text: cleaned + BLOCK };
+
+    const next = [...prev];
+    next[idx] = { ...t, messages: updated };
+    return next;
+  });
+}, [activeItem, setThreadList]);
+
+  /* ===================== SEND (never gate on activeItem) ===================== */
   const handleNewCommandLocal = (command: string) => {
-    if (isSwitchingMode) return; // only block during hard mode switch
-    // forward with optional hint; App will ensure a thread exists (create/focus)
+    if (isSwitchingMode) return; // block only during hard mode switch
     onNewCommand(command, activeItem || undefined);
   };
 
+  /* ===================== STOP (wire to CommandInput) ===================== */
+  const handleStopLocal = React.useCallback(() => {
+    try { markLastAssistantCut(); } catch {}
+    try { onStopGeneration(); } catch {}
+    try { window.dispatchEvent(new CustomEvent('blur:stop')); } catch {}
+  }, [onStopGeneration, markLastAssistantCut]);
+
+  /* ===================== UI helpers ===================== */
   const toggleSidebar = () => setSidebarCollapsed(!sidebarCollapsed);
   const openSettings = () => setShowSettings(true);
   const closeSettings = () => setShowSettings(false);
@@ -154,10 +155,7 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     window.setTimeout(() => setIsSwitchingMode(false), remain);
   }, []);
 
-  useEffect(() => {
-    if (!isSwitchingMode) return;
-    if (connectionStatus === 'ready') endSwitchVisual();
-  }, [connectionStatus, isSwitchingMode, endSwitchVisual]);
+  useEffect(() => { if (isSwitchingMode && connectionStatus === 'ready') endSwitchVisual(); }, [connectionStatus, isSwitchingMode, endSwitchVisual]);
 
   useEffect(() => {
     if (!isSwitchingMode) return;
@@ -185,14 +183,9 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     switchStartAt.current = now;
     setIsSwitchingMode(true);
 
-    try {
-      window.dispatchEvent(new CustomEvent('blur:mode-switch-start', { detail: { intentId, from: currentMode } }));
-    } catch {}
+    try { window.dispatchEvent(new CustomEvent('blur:mode-switch-start', { detail: { intentId, from: currentMode } })); } catch {}
 
-    try {
-      if (isLoading) markLastAssistantCut();
-      onStopGeneration();
-    } catch {}
+    try { if (isLoading) markLastAssistantCut(); onStopGeneration(); } catch {}
 
     try { onModeToggle(); } catch {}
   }, [currentMode, isSwitchingMode, onModeToggle, onStopGeneration, isLoading, markLastAssistantCut]);
@@ -222,17 +215,14 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     document.body.style.userSelect = 'auto';
   }, [handleMouseMove]);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      isResizing.current = true;
-      setIsDragging(true);
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-      document.body.style.userSelect = 'none';
-    },
-    [handleMouseMove, handleMouseUp]
-  );
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    setIsDragging(true);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    document.body.style.userSelect = 'none';
+  }, [handleMouseMove, handleMouseUp]);
 
   useEffect(() => {
     return () => {
@@ -249,25 +239,22 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   }, []);
 
   /* ===================== Context menu ===================== */
-  const handleThreadContextMenu = useCallback(
-    (e: React.MouseEvent, id: string) => {
-      e.preventDefault();
-      if (id !== activeItem) setActiveItem(id);
+  const handleThreadContextMenu = useCallback((e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    if (id !== activeItem) setActiveItem(id);
 
-      const pad = 8;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const x = Math.min(Math.max(e.clientX, pad), vw - 180);
-      const y = Math.min(Math.max(e.clientY, pad), vh - 100);
+    const pad = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const x = Math.min(Math.max(e.clientX, pad), vw - 180);
+    const y = Math.min(Math.max(e.clientY, pad), vh - 100);
 
-      setCtxMenu({ visible: true, x, y, itemId: id, itemType: 'thread' });
+    setCtxMenu({ visible: true, x, y, itemId: id, itemType: 'thread' });
 
-      if (onThreadContextMenuExternal) {
-        try { onThreadContextMenuExternal(e, id); } catch {}
-      }
-    },
-    [activeItem, onThreadContextMenuExternal, setActiveItem]
-  );
+    if (onThreadContextMenuExternal) {
+      try { onThreadContextMenuExternal(e, id); } catch {}
+    }
+  }, [activeItem, onThreadContextMenuExternal, setActiveItem]);
 
   useEffect(() => {
     if (!ctxMenu?.visible) return;
@@ -307,14 +294,13 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     closeMenu();
   };
 
-  /* ===================== UI Bits ===================== */
+  /* ===================== Small UI bits ===================== */
   const ModeShimmer = () => (
     <div className="absolute inset-x-0 top-[57px] h-[2px] overflow-hidden">
       <div className={`${isSwitchingMode ? 'animate-[shimmer_1.2s_linear_infinite]' : 'opacity-0'} h-full w-full bg-gradient-to-r from-transparent via-white/70 to-transparent`} />
       <style>{`@keyframes shimmer { 0%{ transform: translateX(-100%);} 100%{ transform: translateX(100%);} }`}</style>
     </div>
   );
-
   const ModeBadge = () => (
     isSwitchingMode ? (
       <span className="ml-3 inline-flex items-center px-2 py-1 rounded-full border border-white/10 bg-white/5 backdrop-blur-sm select-none">
@@ -324,16 +310,24 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
   );
 
   const handleNewConversationLocal = useCallback(() => {
-    try {
-      if (isLoading) markLastAssistantCut();
-      onStopGeneration();
-    } catch {}
+    try { if (isLoading) markLastAssistantCut(); onStopGeneration(); } catch {}
     onNewConversation();
   }, [isLoading, onStopGeneration, onNewConversation, markLastAssistantCut]);
 
   /* ===================== Render ===================== */
   return (
     <div className="flex flex-col h-full bg-black relative">
+      {/* Inject pulse keyframes/class in case globals didn’t compile them */}
+      <style id="stop-pulse-inject">{`
+        @keyframes pulse-scale-slow-fixed { 0%,100% { transform: scale(1);} 50% { transform: scale(1.10);} }
+        .anim-stop-glow-pulse {
+          display:inline-block !important;
+          will-change: text-shadow, transform;
+          animation: neon-dynamic-glow 6s linear infinite, pulse-scale-slow-fixed 2.6s ease-in-out infinite !important;
+          text-shadow: 0 0 5px rgba(242,0,242,.9), 0 0 10px rgba(242,0,242,.8), 0 0 20px rgba(242,0,242,.7);
+        }
+      `}</style>
+
       <ModeShimmer />
 
       <div className="flex flex-1 overflow-hidden">
@@ -416,11 +410,10 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
 
           <div className="mt-auto flex-shrink-0">
             <CommandInput
-              // 🚀 Always forward; App will create+focus thread if needed.
               onSendMessage={handleNewCommandLocal}
+              onStop={handleStopLocal}
               connectionStatus={connectionStatus}
               isLoading={isLoading || isSwitchingMode}
-              // If your CommandInput supports it, pass the hint too:
               threadId={activeItem || ''}
             />
           </div>

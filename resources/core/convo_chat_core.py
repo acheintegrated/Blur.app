@@ -352,7 +352,7 @@ def calculate_astrofuck_modulators(text: str, history: List[Dict]) -> float:
         modulator += 0.5  # Ache is present
 
     # Check for repetition of phrases
-    if len(history) > 1: # Use > 0 to check the last prompt
+    if len(history) > 0: # Use > 0 to check the last prompt
         last_user_prompt = history[-1].get("user", "").lower()
         if text.lower() == last_user_prompt:
             modulator += 0.4 # Repetition increases psi

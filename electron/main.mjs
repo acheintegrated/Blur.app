@@ -1,9 +1,11 @@
-// electron/main.mjs — REFORGED v12.0 (True Standalone)
+// electron/main.mjs — REFORGED v12.1 (True Standalone + PID Guard)
 // - PACKAGED-FIRST: BLUR_HOME defaults to Resources/ in prod; no "Blur/" subdir.
 // - PYTHON: Spawns embedded venv @ Resources/blur_env-darwin-arm64/bin/python3.
 // - CORE: Runs FastAPI via uvicorn from Resources/core (cwd=that dir).
-// - HEALTH: Clear logs + hard fail if embedded pieces are missing.
+// - HEALTH: Preflight health check; don’t spawn if an instance is already alive.
+// - PID GUARD: Write/remove a PID file; detect stale zombie and cleanly replace.
 // - PERF: Optional GPU clamp, thread clamps for math libs.
+// - RESILIENCE: Single-instance app; no double-spawn on activate; graceful stop.
 
 import { app, BrowserWindow, shell, ipcMain, powerMonitor } from "electron";
 import { spawn } from "child_process";
@@ -41,6 +43,7 @@ let logFile = null;
 let model_status = { status: "loading", message: "initiating…" };
 let isQuitting = false;
 let finalThreadsPayload = null;
+let restartingWithoutFastLoop = false;
 
 const CORE_PORT = String(process.env.BLUR_CORE_PORT || "8000");
 const CORE_HOST = process.env.BLUR_CORE_HOST || "127.0.0.1";
@@ -101,12 +104,32 @@ function readYamlVersion(text = "") {
   const m = text.match(/\bversion:\s*['"]?([^'"\n]+)['"]?/i);
   return (m && m[1] && m[1].trim()) || "";
 }
-
-/** In packaged builds, the bundle root IS process.resourcesPath */
 function getBundledRoot() {
   return process.resourcesPath || join(__dirname, "..");
 }
 
+/* ============================================================================
+   PID GUARD
+============================================================================ */
+const PID_FILE = join(app.getPath("userData"), "core.pid");
+function writePidFile(pid) {
+  try { writeFileSync(PID_FILE, String(pid), "utf8"); } catch {}
+}
+function readPidFile() {
+  try { if (existsSync(PID_FILE)) return parseInt(readFileSync(PID_FILE, "utf8").trim(), 10) || null; } catch {}
+  return null;
+}
+function removePidFile() {
+  try { if (existsSync(PID_FILE)) fs.unlinkSync(PID_FILE); } catch {}
+}
+function processExists(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/* ============================================================================
+   RESOURCES BOOT
+============================================================================ */
 async function ensureBlurHomeAndUnpack() {
   // DEV: prefer repo ./resources if present
   if (!app.isPackaged) {
@@ -286,7 +309,6 @@ function looksLikeBackendDir(p) {
   } catch { return false; }
 }
 function findBackendDir() {
-  // Highest priority: packaged Resources/core
   const packagedCore = join(process.resourcesPath || "", "core");
   const candidates = [
     packagedCore,
@@ -334,6 +356,22 @@ function resolvePython() {
 }
 
 /* ============================================================================
+   NET / HEALTH
+============================================================================ */
+function ping(urlStr) { return new Promise((resolve, reject) => {
+  try {
+    const lib = urlStr.startsWith("https:") ? https : http;
+    const req = lib.get(urlStr, { timeout: 1200 }, (res) => {
+      const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
+      res.resume(); ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
+    });
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+  } catch (e) { reject(e); }
+});}
+async function isCoreHealthy() { try { return await ping(CORE_HEALTH); } catch { return false; } }
+
+/* ============================================================================
    AI CORE
 ============================================================================ */
 function buildUvicornArgs(backendDir, useFastLoop = true) {
@@ -343,8 +381,24 @@ function buildUvicornArgs(backendDir, useFastLoop = true) {
   if (useFastLoop) base.push("--loop","uvloop","--http","httptools");
   return base;
 }
+async function preflightExistingCore() {
+  // If a core is already alive on the port, treat it as the active core (no spawn).
+  if (await isCoreHealthy()) {
+    log("[main] Preflight: core already healthy on port; skipping spawn.");
+    aiReady = true; model_status = { status: "ready", message: "AI Core ready (pre-existing)" }; writePidFile(0); // unknown pid
+    return true;
+  }
+  // If health is bad but pid file exists, check if process is dead; if dead, remove pid.
+  const oldPid = readPidFile();
+  if (oldPid && !processExists(oldPid)) {
+    log(`[main] Preflight: stale PID ${oldPid} — cleaning.`);
+    removePidFile();
+  }
+  return false;
+}
 function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? false : true)) {
   if (aiProc) { log("[main] AI Core start ignored: already running."); return; }
+
   const cfgOK = requireConfigOrFail();
   if (!cfgOK) { broadcastStatus(); return; }
 
@@ -373,7 +427,6 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
-      // ensure venv takes precedence
       VIRTUAL_ENV: join(process.resourcesPath || "", "blur_env-darwin-arm64"),
       PATH: [
         join(process.resourcesPath || "", "blur_env-darwin-arm64", "bin"),
@@ -393,6 +446,8 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
     detached: process.platform !== "win32",
   });
 
+  writePidFile(aiProc.pid || 0);
+
   aiProc.on("error", (err) => {
     log("--- [CRITICAL AI CORE SPAWN ERROR] ---", String(err?.stack||err?.message||err));
     aiReady=false; model_status={status:"error",message:"Fatal: Failed to start AI Core. Check main.log."}; broadcastStatus();
@@ -403,15 +458,19 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
     if(/bad interpreter/i.test(line)){
       log("[main] Python venv broken."); stopAIServer(); aiReady=false; model_status={status:"error",message:"Fatal: Python environment is broken."}; broadcastStatus();
     }
-    if(/(No module named 'uvloop'|No module named 'httptools')/i.test(line)&&useFastLoop){
+    if(/(No module named 'uvloop'|No module named 'httptools')/i.test(line) && useFastLoop && !restartingWithoutFastLoop){
+      restartingWithoutFastLoop = true;
       log("[main] Missing uvloop/httptools — restarting without fast loop…");
-      stopAIServer(); startAIServer(false);
+      stopAIServer();
+      startAIServer(false);
     }
   });
   aiProc.stdout.on("data", (d) => log(`[AI Core]: ${String(d).trim()}`));
   aiProc.on("exit", (code, signal) => {
     log(`--- [AI Core EXIT] code=${code} signal=${signal} ---`);
+    removePidFile();
     aiProc = null; aiReady = false;
+    restartingWithoutFastLoop = false;
     if (model_status.status !== "stopping") {
       model_status = { status: "error", message: `AI Core exited abnormally (code ${code}).` };
       broadcastStatus();
@@ -419,7 +478,7 @@ function startAIServer(useFastLoop = (process.env.BLUR_NO_FASTLOOP === "1" ? fal
   });
 }
 function stopAIServer() {
-  if (!aiProc) { log("[main] AI Core stop ignored: not running."); return; }
+  if (!aiProc) { log("[main] AI Core stop ignored: not running."); removePidFile(); return; }
   log("[main] Stopping AI Core…");
   try {
     if (process.platform === "win32") spawn("taskkill", ["/PID", String(aiProc.pid), "/T", "/F"]);
@@ -429,6 +488,7 @@ function stopAIServer() {
     setTimeout(() => { try { aiProc.kill("SIGKILL"); } catch {} }, 1500);
   }
   aiProc = null; aiReady = false; model_status = { status: "stopping", message: "AI Core stopping…" }; broadcastStatus();
+  removePidFile();
 }
 
 /* ============================================================================
@@ -463,7 +523,7 @@ function showSplash(initialMsg = model_status.message) {
     webPreferences: { backgroundThrottling: false }
   });
   const dataUrl = "data:text/html;charset=utf-8," + encodeURIComponent(splashHTML(initialMsg));
-  splashWindow.loadURL(dataUrl).catch(()=>{});
+  splashWindow.loadURL(dataUrl).catch(() => {});
   splashWindow.on("closed", () => { splashWindow = null; });
 }
 function updateSplash(msg, cls="dim") {
@@ -533,22 +593,6 @@ async function createWindow() {
 }
 
 /* ============================================================================
-   NET / HEALTH
-============================================================================ */
-function ping(urlStr) { return new Promise((resolve, reject) => {
-  try {
-    const lib = urlStr.startsWith("https:") ? https : http;
-    const req = lib.get(urlStr, { timeout: 1200 }, (res) => {
-      const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
-      res.resume(); ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
-    });
-    req.on("error", reject);
-    req.on("timeout", () => req.destroy(new Error("timeout")));
-  } catch (e) { reject(e); }
-});}
-async function isCoreHealthy() { try { return await ping(CORE_HEALTH); } catch { return false; } }
-
-/* ============================================================================
    IPC
 ============================================================================ */
 ipcMain.handle("core:getInfo", () => ({ ready: !!aiReady, status: model_status }));
@@ -587,21 +631,33 @@ else {
 
     const cfgOK = requireConfigOrFail();
     if (cfgOK) {
-      startAIServer();
-      model_status = { status: "starting", message: "initializing AI Core…" }; broadcastStatus();
+      // ✅ don’t spawn a second core if one is already healthy
+      if (await preflightExistingCore()) {
+        aiReady = true;
+        model_status = { status: "ready", message: "AI Core ready (pre-existing)" };
+        broadcastStatus();
+      } else {
+        startAIServer();
+        model_status = { status: "starting", message: "initializing AI Core…" };
+        broadcastStatus();
 
-      (async () => {
-        const started = Date.now();
-        while (Date.now() - started < 60000) {
-          if (await isCoreHealthy()) {
-            aiReady = true; model_status = { status: "ready", message: "AI Core ready" }; broadcastStatus(); return;
+        (async () => {
+          const started = Date.now();
+          while (Date.now() - started < 60000) {
+            if (await isCoreHealthy()) {
+              aiReady = true;
+              model_status = { status: "ready", message: "AI Core ready" };
+              broadcastStatus();
+              return;
+            }
+            await new Promise(r => setTimeout(r, 1200));
           }
-          await new Promise(r => setTimeout(r, 1200));
-        }
-        if (model_status.status === "starting") {
-          model_status = { status: "degraded", message: "AI Core startup timeout." }; broadcastStatus();
-        }
-      })();
+          if (model_status.status === "starting") {
+            model_status = { status: "degraded", message: "AI Core startup timeout." };
+            broadcastStatus();
+          }
+        })();
+      }
     } else {
       broadcastStatus();
     }

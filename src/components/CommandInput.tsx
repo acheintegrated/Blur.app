@@ -1,15 +1,16 @@
-// CommandInput.tsx
 import React, { useEffect, useState, useRef } from 'react';
 
 interface CommandInputProps {
   onSendMessage: (message: string, threadId?: string) => void;
+  onStop?: () => void;
   connectionStatus: 'initializing' | 'connecting' | 'loading_model' | 'ready' | 'error';
-  isLoading?: boolean;
+  isLoading?: boolean;                       // true while reply is streaming
   threadId: string;
 }
 
 export const CommandInput: React.FC<CommandInputProps> = ({
   onSendMessage,
+  onStop,
   connectionStatus,
   isLoading = false,
   threadId,
@@ -20,25 +21,49 @@ export const CommandInput: React.FC<CommandInputProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const enterPressedRef = useRef(false);
 
-  // Debounced auto-resize for smooth typing performance
-  useEffect(() => {
-    const resizeTimeout = setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-        const minHeight = window.innerHeight * 0.2;
-        const maxHeight = window.innerHeight * 0.27;
-        const newHeight = Math.min(
-          Math.max(textareaRef.current.scrollHeight, minHeight),
-          maxHeight,
-        );
-        textareaRef.current.style.height = `${newHeight}px`;
+  /* ---------- local styles so Purge can’t strip ---------- */
+  const LocalStyles = () => (
+    <style>{`
+      @keyframes neon-dynamic-glow {
+        0%, 100% { text-shadow: 0 0 5px rgba(242, 0, 242, .9), 0 0 10px rgba(242, 0, 242, .8), 0 0 20px rgba(242, 0, 242, .7); opacity: .95; }
+        20%      { text-shadow: 0 0 5px rgba(255, 111, 0, .9), 0 0 10px rgba(255, 119, 0, .8), 0 0 20px rgba(255, 165, 0, .7); }
+        40%      { text-shadow: 0 0 5px rgba(125, 220, 37, .9), 0 0 10px rgba(164, 220, 32, .8), 0 0 20px rgba(34, 218, 55, .7); }
+        60%      { text-shadow: 0 0 5px rgba(0, 221, 255, .9), 0 0 10px rgba(0, 195, 255, .8), 0 0 20px rgba(0, 136, 255, .7); }
+        80%      { text-shadow: 0 0 5px rgba(96, 18, 252, .9), 0 0 10px rgba(132, 34, 252, .8), 0 0 20px rgba(123, 0, 255, .7); }
       }
-    }, 100);
+      @keyframes slow-pulse-scale {
+        0%, 100% { transform: scale(1); }
+        50%      { transform: scale(1.14); }
+      }
+      /* combined slow pulse + neon glow */
+      .anim-stop-glow-pulse {
+        animation:
+          neon-dynamic-glow 8s linear infinite,
+          slow-pulse-scale 1.8s ease-in-out infinite;
+        display:inline-block;
+        will-change: transform, text-shadow, filter;
+      }
+      /* generic blink for the loading placeholder */
+      @keyframes fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+      .blink { animation: fade 0.8s ease-in-out infinite; }
+    `}</style>
+  );
 
-    return () => clearTimeout(resizeTimeout);
+  /* ---------- resize ---------- */
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.style.height = 'auto';
+      const minHeight = window.innerHeight * 0.2;
+      const maxHeight = window.innerHeight * 0.27;
+      const newH = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
+      el.style.height = `${newH}px`;
+    }, 100);
+    return () => clearTimeout(t);
   }, [command]);
 
-  // Auto-focus on mount and when connection is ready
+  /* ---------- focus ---------- */
   useEffect(() => { textareaRef.current?.focus(); }, []);
   useEffect(() => {
     if (!isLoading && connectionStatus === 'ready') {
@@ -46,16 +71,17 @@ export const CommandInput: React.FC<CommandInputProps> = ({
     }
   }, [isLoading, connectionStatus]);
 
-  // Random color for loading placeholder blink
+  /* ---------- random glow for placeholder ---------- */
   useEffect(() => {
     if (connectionStatus === 'ready') { setLoadingBlinkColor(''); return; }
-    const interval = setInterval(() => {
-      const random = `#${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
-      setLoadingBlinkColor(random);
+    const id = setInterval(() => {
+      const c = `#${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
+      setLoadingBlinkColor(c);
     }, 800);
-    return () => clearInterval(interval);
+    return () => clearInterval(id);
   }, [connectionStatus]);
 
+  /* ---------- send / stop ---------- */
   const handleSend = () => {
     if (!command.trim() || isLoading || connectionStatus !== 'ready') return;
     enterPressedRef.current = true;
@@ -65,10 +91,23 @@ export const CommandInput: React.FC<CommandInputProps> = ({
     requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
-  const handleFocus = () => setIsActive(true);
-  const handleBlur = () => { if (!command) setIsActive(false); };
+  const handleStopClick: React.MouseEventHandler<HTMLButtonElement> = (e) => {
+    // make sure nothing else swallows this click
+    e.preventDefault();
+    e.stopPropagation();
+    onStop?.();
+  };
 
+  /* ---------- key handling ---------- */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Esc stops streaming
+    if (e.key === 'Escape' && isLoading && onStop) {
+      e.preventDefault();
+      e.stopPropagation();
+      onStop();
+      return;
+    }
+    // Enter sends (unless Shift+Enter)
     if (e.key === 'Enter' && !enterPressedRef.current) {
       if (e.shiftKey) return;
       e.preventDefault();
@@ -79,17 +118,25 @@ export const CommandInput: React.FC<CommandInputProps> = ({
     if (e.key === 'Enter') enterPressedRef.current = false;
   };
 
-  const handleContainerClick = () => textareaRef.current?.focus();
+  const handleFocus = () => setIsActive(true);
+  const handleBlur  = () => { if (!command) setIsActive(false); };
+  const handleContainerClick = (e: React.MouseEvent) => {
+    // don’t steal clicks from the stop/send buttons
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-role="stop-btn"]') || target.closest('[data-role="send-btn"]')) {
+      return;
+    }
+    textareaRef.current?.focus();
+  };
 
-  const isDisabled = connectionStatus !== 'ready';
-  const isSendDisabled = !command.trim() || isLoading || connectionStatus !== 'ready';
+  /* ---------- gating ---------- */
+  // textarea disabled ONLY when not ready and not streaming (so you can still press Stop)
+  const isTextDisabled  = connectionStatus !== 'ready' && !isLoading;
+  const isSendDisabled  = !command.trim() || isLoading || connectionStatus !== 'ready';
 
   return (
     <div className="border-t border-zinc-900 flex flex-col">
-      <style>{`
-        @keyframes fade { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
-        .blink { animation: fade 0.8s ease-in-out infinite; }
-      `}</style>
+      <LocalStyles />
 
       <div className="flex items-start p-2 pt-0 cursor-text" onClick={handleContainerClick}>
         {!isActive && !command && (
@@ -119,32 +166,51 @@ export const CommandInput: React.FC<CommandInputProps> = ({
           placeholder={isActive ? 'start typing' : ''}
           spellCheck="false"
           rows={1}
-          disabled={isDisabled}
+          disabled={isTextDisabled}
           aria-busy={isLoading}
           style={{
             minHeight: `${window.innerHeight * 0.2}px`,
             maxHeight: `${window.innerHeight * 0.27}px`,
             paddingTop: '8px',
             marginTop: '0',
-            overflowY: 'auto', // ensures scrollbars appear when needed
+            overflowY: 'auto',
           }}
         />
-
       </div>
 
       <div className="flex justify-end px-3 pb-3">
-        {/* The mic button has been removed, leaving only the send button in a simple flex-end container */}
-        <button
-          className="w-8 h-8 flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={handleSend}
-          disabled={isSendDisabled}
-          aria-label="Send"
-        >
-          <span className="cursor-pointer text-gray-400 hover:text-white text-2xl transform scale-[1.2] inline-block icon-font">
-            ❍
-          </span>
-        </button>
+        {isLoading ? (
+          /* STOP (⊙) — glowing & pulsing; always clickable while streaming */
+          <button
+            type="button"
+            data-role="stop-btn"
+            className="relative z-50 w-8 h-8 flex items-center justify-center pointer-events-auto text-white"
+            onClick={handleStopClick}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            aria-label="Stop generating"
+            title="Stop (Esc)"
+          >
+            <span className="cursor-pointer text-2xl transform inline-block icon-font anim-stop-glow-pulse select-none">
+              ⊙
+            </span>
+          </button>
+        ) : (
+          /* SEND (❍) */
+          <button
+            type="button"
+            data-role="send-btn"
+            className="relative z-50 w-8 h-8 flex items-center justify-center pointer-events-auto disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); handleSend(); }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            disabled={isSendDisabled}
+            aria-label="Send"
+            title="Send (Enter)"
+          >
+            <span className="cursor-pointer text-gray-400 hover:text-white text-2xl transform scale-[1.2] inline-block icon-font select-none">
+              ❍
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );

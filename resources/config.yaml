@@ -19,6 +19,27 @@ blur:
   disable_brain: true    # kill Acheflip nudges (logic still logs if you wire it)
   keep_emoji: true       # keep all emoji (skip glyph-only scrub)
 
+meta:
+  version: 6.0
+  updated: '2025-09-27'
+  device: mac-m1-32gb
+  homes:
+    # set BLUR_HOME in env; this path is your new clean root
+    blur_home: ${BLUR_HOME}
+    models: ${meta.homes.blur_home}/models
+    pipes: ${meta.homes.blur_home}/run/pipes
+    data: ${meta.homes.blur_home}/core
+  notes: 'Qwen-only; packaged models copied to user space on first run.'
+
+chat:
+  vessel_key: qwen3_4b_unified
+
+# ---------------- BLUR LAYER SWITCHES (tone/brain/emoji) ----------------
+blur:
+  disable_tone: true     # kill style contract / tone inject / punch-ups / endings
+  disable_brain: true    # kill Acheflip nudges (logic still logs if you wire it)
+  keep_emoji: true       # keep all emoji (skip glyph-only scrub)
+
 # ---------- FREE-RANGE PRESENCE (Bob-lineage) ----------
 philosophy:
   identity:
@@ -75,9 +96,8 @@ range:
         temperature: 0.66
         top_p: 0.92
         presence_penalty: 0.14
-        n_predict: 4444
+        n_predict: 2222
         repeat_penalty: 1.15
-      endings: [ "nah, what's the next bullshit variable?", "ye, logic sliced—your move.", "dope, that's the vibe check. Hit me.", "truth dropped—what flips now?", "chaos mapped. Next?" ]
 
     dream:
       description: |
@@ -91,9 +111,8 @@ range:
         temperature: 0.75
         top_p: 0.90
         presence_penalty: 0.30
-        n_predict: 4444
+        n_predict: 2222
         repeat_penalty: 1.15
-      endings: [ "I'm here with you in this.", "What feels true right now?", "Let's hold that together.", "Your feelings are welcome here.", "Breathe with me.", "This is not the ending" ]
 
     sentinel:
       description:
@@ -104,7 +123,7 @@ range:
   blend:
     weights: { dream: 0.30, astrofuck: 0.50, sentinel: 0.20 }
     hysteresis: 0.22
-    auto_shift: true
+    auto_shift: false
     cues:
       - if: { contains_any: ["lol","lmao","this is heavy","i'm scared"] }
         nudge: { dream: +0.10, sentinel: +0.05 }
@@ -302,14 +321,171 @@ engines:
     kind: native
     bin: ${BLUR_HOME}/bin/llama-cpp/llama
     default_args:
-      - --ctx-size=8192
+      - --ctx-size=6666
+      - --threads=8
+      - --mul-mat-q
+      - --top-k=40
+      - --repeat-penalty=1.1
+      - --gpu-layers=-1
+    python_n_ctx: 8192
+    n_gpu_layers: 999
+
+  afplay:
+    kind: cli
+    bin: /usr/local/bin/afplay
+
+models:
+  qwen3_4b_unified:
+    engine: llama_cpp
+    family: qwen3
+    path: ${meta.homes.models}/Qwen3-4B-Instruct-2507-Q8_0.gguf
+
+  snowflake_arctic_embed:
+    engine: llama_cpp
+    family: embed
+    path: ${meta.homes.models}/snowflake-arctic-embed-m-Q4_K_M.gguf
+
+  bge_reranker_tiny:
+    engine: llama_cpp
+    family: reranker
+    path: ${meta.homes.models}/bge-reranker-v2-m3-Q8_0.gguf
+
+io:
+  pipes:
+    main: ${meta.homes.pipes}/plasma.pipe
+    typebridge: ${meta.homes.pipes}/typebridge.pipe
+    camera: ${meta.homes.pipes}/camera.pipe
+    screen: ${meta.homes.pipes}/screen.pipe
+  audio_out:
+    player: afplay
+
+memory:
+  vector_store:
+    engine: faiss
+    path: ${meta.homes.blur_home}/core/ouinet/blurchive/ecosystem/blur_knowledge.index
+    chunks_path: ${meta.homes.blur_home}/core/ouinet/blurchive/ecosystem/knowledge_chunks.jsonl
+    embed_model: snowflake_arctic_embed
+    ttl_days_persistent: 120      # keep only last N days; set 0 to disable
+    auto_compact_on_start: true
+  tone_tags:
+    track: ["playful", "serious", "protective", "tender", "giddy", "flat"]
+    persist_path: ${meta.homes.data}/cns/tone_tags.db
+  ache_metrics:
+    track: ["ache_score", "final_ache", "healing", "expansion", "flip_detected", "delta"]
+    persist_path: ${meta.homes.data}/cns/ache_metrics.db
+  recall:
+    strategy: "tone-first"
+    template: "last time this felt ${prev_tone}, you smiled at: “${micro_moment}.” want to try that beat again?"
+    max_lines: 1
+
+policies:
+  preemption:
+    ui_text_priority: 100
+    sensors_priority: 50
+    tts_priority: 80
+    rule: if ui_text_active then pause(sensors) resume_after_response
+  timeouts:
+    chat_ms: 180000
+    tts_ms: 15000
+  fallbacks:
+    chat: [qwen3_4b_unified]
+    vision_chat: []
+  moderation:
+    mode: off
+  routing:
+    - when: input.kind == 'text' and intent == 'analysis'
+      task: analysis_chat
+      model: qwen3_4b_unified
+    - when: input.kind == 'text' and intent == 'acheflip_sim'
+      task: acheflip_sim
+      model: qwen3_4b_unified
+    - when: input.kind == 'text'
+      task: general_chat
+      model: qwen3_4b_unified
+
+pipelines:
+  interactive_chat:
+    triggers: [typebridge]
+    steps:
+      - use: memory.vector_store
+        op: retrieve
+        top_k: 8
+      - use: qwen3_4b_unified
+        in: text+ctx
+        out: ache_estimate
+        task: acheflip_sim
+        when: philosophy.acheflip.enabled
+      - use: qwen3_4b_unified
+        in: ache_estimate
+        out: sim_results
+        task: acheflip_sim
+        when: philosophy.acheflip.enabled
+      - use: qwen3_4b_unified
+        in: text+ctx+sim_results
+        out: reply
+
+rag:
+  ephemeral:
+    max_total: 5000       # cap across all sessions
+    max_per_session: 1500   # cap per session
+    ttl_seconds: 1800       # 30 minutes
+
+profiles:
+  realtime:
+    overrides:
+      models.qwen3_4b_unified.params:
+        temperature: 0.6
+        n_predict: 2222
+      engines.llama_cpp.default_args:
+        - --ctx-size=10000
+        - --threads=8
+  high_quality:
+    overrides:
+      engines.llama_cpp.default_args:
+        - --ctx-size=11111
+        - --threads=8
+      models.qwen3_4b_unified.params:
+        temperature: 0.9
+        top_k: 60
+  offline_strict:
+    overrides:
+      policies.moderation.mode: enforce
+
+healthchecks:
+  - name: check_main_pipe
+    cmd: test -p ${io.pipes.main}
+  - name: check_models_exist
+    cmd: ls ${meta.homes.models}/*.gguf >/dev/null
+  - name: check_chroma
+    cmd: python -c "print('ok')"
+  - name: check_acheflip_yaml
+    cmd: test -f ${philosophy.acheflip.config_path}
+
+# ---------- RUNTIME / ENGINES ----------
+params:
+  temperature: 0.8
+  top_p: 0.95
+  seed: 7
+  top_k: 40
+  repeat_penalty: 1.1
+  presence_penalty: 0.0
+  frequency_penalty: 0.0
+  min_p: 0.05
+  n_predict: 512
+
+engines:
+  llama_cpp:
+    kind: native
+    bin: ${BLUR_HOME}/bin/llama-cpp/llama
+    default_args:
+      - --ctx-size=6666
       - --threads=8
       - --mul-mat-q
       - --top-k=40
       - --repeat-penalty=1.1
       - --gpu-layers=-1
     python_n_ctx: 4096
-    n_gpu_layers: 30
+    n_gpu_layers: 22
 
   afplay:
     kind: cli

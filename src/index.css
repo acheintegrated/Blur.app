@@ -302,6 +302,14 @@
   50%      { background-color: rgba(139,92,246,.8); box-shadow: 0 0 3px rgba(139,92,246,.6); }
 }
 
+@keyframes pulse-scale-slow {
+  0%, 100% { transform: scale(1.00); }
+  50%      { transform: scale(1.88); }
+}
+.pulse-scale-slow {
+  animation: pulse-scale-slow 2.4s ease-in-out infinite;
+}
+
 /* =========================================
    Effect Classes
 ========================================= */
@@ -411,6 +419,25 @@ body {
 .mode-dream-active {
   animation: dream-dynamic-glow 8s linear infinite;
   color: #fff; filter: saturate(1.5) brightness(1.2);
+}
+
+/* --- CommandInput glow compat --- */
+.neon-cycle-compat {
+  /* use your existing keyframes neon-dynamic-glow */
+  animation: neon-dynamic-glow 4s linear infinite !important; /* slower */
+  text-shadow: 0 0 5px rgba(242,0,242,.9), 0 0 10px rgba(242,0,242,.8), 0 0 20px rgba(242,0,242,.7) !important;
+  will-change: text-shadow, transform;
+  isolation: isolate;           /* helps on dark bg stacking */
+  backface-visibility: hidden;  /* reduces flicker during scale */
+}
+
+.anim-stop-glow-pulse {
+  animation:
+    neon-dynamic-glow 8s linear infinite,
+    slow-pulse-scale 1.8s ease-in-out infinite;
+  display:inline-block;
+  will-change: transform, text-shadow, filter;
+  filter: drop-shadow(0 0 0.25rem currentColor);
 }
 
 /* Cursor blink */

@@ -75,9 +75,8 @@ range:
         temperature: 0.66
         top_p: 0.92
         presence_penalty: 0.14
-        n_predict: 4444
+        n_predict: 2222
         repeat_penalty: 1.15
-      endings: [ "nah, what's the next bullshit variable?", "ye, logic sliced—your move.", "dope, that's the vibe check. Hit me.", "truth dropped—what flips now?", "chaos mapped. Next?" ]
 
     dream:
       description: |
@@ -91,9 +90,8 @@ range:
         temperature: 0.75
         top_p: 0.90
         presence_penalty: 0.30
-        n_predict: 4444
+        n_predict: 2222
         repeat_penalty: 1.15
-      endings: [ "I'm here with you in this.", "What feels true right now?", "Let's hold that together.", "Your feelings are welcome here.", "Breathe with me.", "This is not the ending" ]
 
     sentinel:
       description:
@@ -104,7 +102,7 @@ range:
   blend:
     weights: { dream: 0.30, astrofuck: 0.50, sentinel: 0.20 }
     hysteresis: 0.22
-    auto_shift: true
+    auto_shift: false
     cues:
       - if: { contains_any: ["lol","lmao","this is heavy","i'm scared"] }
         nudge: { dream: +0.10, sentinel: +0.05 }
@@ -302,14 +300,14 @@ engines:
     kind: native
     bin: ${BLUR_HOME}/bin/llama-cpp/llama
     default_args:
-      - --ctx-size=8192
+      - --ctx-size=6666
       - --threads=8
       - --mul-mat-q
       - --top-k=40
       - --repeat-penalty=1.1
       - --gpu-layers=-1
-    python_n_ctx: 4096
-    n_gpu_layers: 30
+    python_n_ctx: 8192
+    n_gpu_layers: 999
 
   afplay:
     kind: cli

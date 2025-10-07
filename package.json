@@ -36,33 +36,37 @@
     "asar": true,
     "asarUnpack": [
       "**/*.node",
-      "electron/backend/**",
-      "core/bin/**",
-      "core/ouinet/**",
-      "core/ouinet/blurchive/**",
-      "blur_env-darwin-arm64/**"
+      "**/*.dylib",
+      "blur_env-darwin-arm64/**",
+      "core/**",
+      "models/**"
     ],
     "afterPack": "build/afterPack.cjs",
     "files": [
       "dist/**",
+      "!dist/*.dmg",
+      "!dist/*.zip",
+      "!dist/mac*/**",
+      "!dist/win*/**",
+      "!dist/linux*/**",
       "electron/**",
       "!electron/backend/**",
       "!**/*.map"
     ],
     "extraResources": [
+      { "from": "electron/backend", "to": "core" },
+      { "from": "core/ouinet/blurchive/ecosystem", "to": "core/ouinet/blurchive/ecosystem" },
       { "from": "config.yaml", "to": "config.yaml" },
       { "from": "acheflip.yaml", "to": "acheflip.yaml" },
       { "from": "models", "to": "models" },
-      { "from": "electron/backend", "to": "core" },
-      { "from": "core", "to": "core" },
       { "from": "blur_env-darwin-arm64", "to": "blur_env-darwin-arm64" }
     ],
     "mac": {
       "target": ["dmg"],
       "category": "public.app-category.productivity",
       "hardenedRuntime": true,
-      "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist"
     }
   },
   "devDependencies": {
