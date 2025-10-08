@@ -4,7 +4,9 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig(({ command }) => ({
-  plugins: [react(), tailwindcss()],
+  content: ["./index.html", "./src/**/*.{ts,tsx,js,jsx}"],
+  theme: { extend: {} },
+  plugins: [],
 
   base: command === 'serve' ? '/' : './',
 

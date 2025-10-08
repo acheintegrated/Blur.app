@@ -203,7 +203,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   return (
     <div className="h-full flex flex-col text-white bg-black">
       <div className="py-4 px-4 border-b border-zinc-900 flex items-center h-[57px]">
-        <span className="text-2xl font-bold neon-rainbow-glow">∴ blur.</span>
+        <span className="text-2xl font-bold acheintegrated-glow">∴ blur.</span>
       </div>
 
       <div className="px-4 py-3">

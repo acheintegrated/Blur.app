@@ -1,7 +1,7 @@
-// REFORGED v10.9 — Voidless Send
-// - GUARANTEE: Typing on an empty slate auto-creates + activates a thread before streaming.
-// - STABILITY: No UI gating required in TerminalLayout; App owns creation.
-// - SAVE: Debounced thread saves unchanged.
+// REFORGED v10.10 — Static Bundle Integrity
+// - GUARANTEE: The CursorGlow component is now force-bundled via a static import, preventing it from being tree-shaken by Vite/Rollup in the Electron build.
+// - INTEGRATION: The CursorGlow component is mounted in the main App layout and is wired to be 'emphatic' during stream generation.
+// - STABILITY: All other logic, including voidless send and debounced saves, remains unchanged.
 
 import React, {
   useEffect,
@@ -15,6 +15,7 @@ import React, {
 import { TerminalLayout } from "./components/TerminalLayout";
 import { SettingsProvider, useSettings } from "./components/SettingsContext";
 import { useLastRoute } from "./components/hooks/useLastRoute";
+import { CursorGlow } from "./components/CursorGlow"; // <-- GUARANTEES BUNDLING
 
 interface Message {
   sender: "Blur" | "You" | "System";
@@ -459,7 +460,7 @@ const AppContent: React.FC = () => {
       setSidebarCollapsed,
       threadList,
       setThreadList,
-      onNewCommand: handleNewCommand, // accepts (message: string, threadId?: string)
+      onNewCommand: handleNewCommand,
       onNewConversation: handleNewConversation,
       currentMode,
       onModeToggle: handleModeToggle,
@@ -476,6 +477,7 @@ const AppContent: React.FC = () => {
 
   return (
     <div className="w-full h-screen overflow-hidden">
+      <CursorGlow isEmphatic={isLoading} />
       <TerminalLayout {...layoutProps} />
     </div>
   );

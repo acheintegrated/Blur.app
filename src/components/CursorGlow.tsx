@@ -4,7 +4,7 @@ import React, { useEffect, useRef } from 'react';
 interface CursorGlowProps {
   isEmphatic?: boolean;   // stronger glow + more dust while streaming
   scopeSelector?: string; // where to hide the OS cursor. default: 'body'
-  cursorSize?: number;    // px edge of the square (default 6)
+  cursorSize?: number;    // px diameter of the star core (default 3)
   pool?: number;          // max confetti particles (default 160)
 }
 
@@ -21,12 +21,11 @@ type P = {
 export const CursorGlow: React.FC<CursorGlowProps> = ({
   isEmphatic = false,
   scopeSelector = 'body',
-  cursorSize = 6,
+  cursorSize = 3,
   pool = 160,
 }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   const cursorRef = useRef<HTMLDivElement>(null);
-  const haloRef = useRef<HTMLDivElement>(null);
 
   const particles = useRef<P[]>([]);
   const els = useRef<Array<HTMLDivElement | null>>([]);
@@ -65,7 +64,6 @@ export const CursorGlow: React.FC<CursorGlowProps> = ({
 
   // input + loop
   useEffect(() => {
-    // seed position at first move
     const onFirst = (e: MouseEvent) => {
       target.current.x = e.clientX; target.current.y = e.clientY;
       pos.current.x = e.clientX; pos.current.y = e.clientY;
@@ -85,40 +83,24 @@ export const CursorGlow: React.FC<CursorGlowProps> = ({
       const dt = Math.min(0.05, (t - tPrev) / 1000); // clamp
       tPrev = t;
 
-      // ease cursor toward target
       const ease = 0.22;
       pos.current.x += (target.current.x - pos.current.x) * ease;
       pos.current.y += (target.current.y - pos.current.y) * ease;
 
-      const vx = target.current.x - last.current.x;
-      const vy = target.current.y - last.current.y;
-      const speed = Math.hypot(vx, vy);
+      const speed = Math.hypot(target.current.x - last.current.x, target.current.y - last.current.y);
       last.current.x = target.current.x;
       last.current.y = target.current.y;
 
-      // hue over time + speed
       const baseHue = (t * 0.06 + speed * 2) % 360;
 
-      // place tiny square cursor
       if (cursorRef.current) {
         cursorRef.current.style.transform =
           `translate(${pos.current.x}px, ${pos.current.y}px) translate(-50%, -50%)`;
         cursorRef.current.style.setProperty('--h', String(baseHue));
-      }
-      // halo glow lags slightly (soft)
-      if (haloRef.current) {
-        const lag = 0.12;
-        const hx = pos.current.x + (target.current.x - pos.current.x) * lag;
-        const hy = pos.current.y + (target.current.y - pos.current.y) * lag;
-        haloRef.current.style.transform =
-          `translate(${hx}px, ${hy}px) translate(-50%, -50%)`;
-        haloRef.current.style.setProperty('--h', String((baseHue + 20) % 360));
-        haloRef.current.style.opacity = String(Math.min(1, 0.35 + speed / 40) * (isEmphatic ? 1.2 : 1));
-        haloRef.current.style.filter = `blur(${10 + Math.min(30, speed)}px)`;
+        cursorRef.current.style.setProperty('--emph', isEmphatic ? '1' : '0');
       }
 
-      // spawn “digital dust” squares based on speed
-      const spawnBase = isEmphatic ? 12 : 8;
+      const spawnBase = isEmphatic ? 8 : 8;
       let toSpawn = Math.min(24, Math.floor((spawnBase + speed * 0.25)));
       while (toSpawn-- > 0) {
         const p = particles.current.find((q) => !q.alive);
@@ -130,21 +112,21 @@ export const CursorGlow: React.FC<CursorGlowProps> = ({
         const mag = (Math.random() * 60 + 30) * (0.4 + Math.min(1, speed / 24)); // px/s
         p.vx = Math.cos(ang) * mag;
         p.vy = Math.sin(ang) * mag;
-        p.size = Math.random() * 3 + 1.5; // tiny squares
-        p.maxLife = (isEmphatic ? 0.9 : 0.75) + Math.random() * 0.4;
+        p.size = Math.random() * 2.5 + 1; // smaller dust
+        p.maxLife = (isEmphatic ? 1.0 : 0.85) + Math.random() * 0.4;
         p.life = p.maxLife;
         p.hue = (baseHue + Math.random() * 80 - 40 + 360) % 360;
 
-        // style the square once
         const el = p.el!;
         el.style.width = `${p.size}px`;
         el.style.height = `${p.size}px`;
-        const c = `hsl(${p.hue} 100% 60%)`;
+        // DIMMER: Significantly reduced lightness
+        const c = `hsl(${p.hue} 90% 35%)`;
+        // UNCHANGED: Kept the white background as requested
         el.style.background = 'white';
-        el.style.boxShadow = `0 0 6px ${c}, 0 0 12px ${c}, 0 0 20px ${c}`;
+        el.style.boxShadow = `0 0 4px ${c}, 0 0 8px ${c}`;
       }
 
-      // update particles
       const drag = 0.9;
       particles.current.forEach((p) => {
         if (!p.alive) return;
@@ -159,7 +141,8 @@ export const CursorGlow: React.FC<CursorGlowProps> = ({
         p.y += p.vy * dt;
         const k = p.life / p.maxLife;
         const el = p.el!;
-        el.style.opacity = String(Math.max(0, k));
+        // TRANSLUCENT: Fade out is slightly faster
+        el.style.opacity = String(Math.max(0, k * 1.25));
         el.style.transform = `translate(${p.x}px, ${p.y}px) translate(-50%, -50%) rotate(${(1 - k) * 180}deg)`;
       });
 
@@ -170,56 +153,52 @@ export const CursorGlow: React.FC<CursorGlowProps> = ({
     return () => {
       window.removeEventListener('mousemove', onMove);
       if (raf.current) cancelAnimationFrame(raf.current);
-      raf.current = null;
     };
   }, [isEmphatic, cursorSize]);
 
   return (
     <>
-      {/* hide OS cursor inside scope only */}
       <style>{`${scopeSelector}, ${scopeSelector} * { cursor: none !important; }`}</style>
-      {/* component styles */}
       <style>{`
+        @keyframes cg2-star-pulse {
+          0%, 100% {
+            transform: translate(-50%, -50%) scale(1);
+            filter: brightness(1);
+          }
+          50% {
+            transform: translate(-50%, -50%) scale(1.15);
+            filter: brightness(1.25);
+          }
+        }
+
         .cg2-root { position: fixed; inset: 0; z-index: 2147483647; pointer-events: none; }
-        .cg2-cursor, .cg2-halo, .cg2-dust {
-          position: absolute; left: 0; top: 0; transform: translate(-50%,-50%);
+        .cg2-cursor, .cg2-dust {
+          position: absolute; left: 0; top: 0;
           will-change: transform, filter, opacity, box-shadow;
           pointer-events: none;
         }
-        /* tiny square cursor */
+
         .cg2-cursor {
-          width: ${cursorSize}px; height: ${cursorSize}px; border-radius: 1px;
+          transform: translate(-50%,-50%);
+          width: ${cursorSize}px; height: ${cursorSize}px; border-radius: 9999px;
+          /* UNCHANGED: Kept the white background as requested */
           background: white;
-          /* rainbow neon: hue via --h */
+          /* DIMMER/TRANSLUCENT: Greatly reduced lightness and opacity */
           box-shadow:
-            0 0 6px hsl(var(--h, 280) 100% 60% / .95),
-            0 0 14px hsl(var(--h, 280) 100% 60% / .75),
-            0 0 26px hsl(calc((var(--h, 280) + 40)) 100% 60% / .55),
-            0 0 40px hsl(calc((var(--h, 280) + 80)) 100% 60% / .35);
+            0 0 3px hsl(var(--h, 280) 95% 65% / 0.7),
+            0 0 7px hsl(var(--h, 280) 90% 55% / 0.4),
+            0 0 12px hsl(var(--h, 280) 85% 45% / 0.15);
         }
-        /* soft rainbow halo that lags */
-        .cg2-halo {
-          width: ${cursorSize * 12}px; height: ${cursorSize * 12}px; border-radius: 9999px;
-          background: radial-gradient(closest-side,
-            hsl(calc((var(--h, 280) + 0)) 100% 60% / .22),
-            hsl(calc((var(--h, 280) + 40)) 100% 60% / .18),
-            hsl(calc((var(--h, 280) + 80)) 100% 60% / .08),
-            transparent 70%
-          );
-          filter: blur(18px);
-          opacity: .4;
-          mix-blend-mode: screen;
-        }
+
         .cg2-dust {
+          transform: translate(-50%,-50%);
           border-radius: 2px;
           mix-blend-mode: screen;
         }
       `}</style>
 
       <div ref={rootRef} className="cg2-root" aria-hidden>
-        <div ref={haloRef} className="cg2-halo" />
         <div ref={cursorRef} className="cg2-cursor" />
-        {/* dust squares are appended dynamically */}
       </div>
     </>
   );

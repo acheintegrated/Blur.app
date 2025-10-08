@@ -11,9 +11,13 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml electron .",
-    "dist": "npm run prep:venv && vite build && BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder",
-    "pack:dmg": "npm run prep:venv && vite build && BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --arm64",
-    "dist:mac:pkg": "npm run prep:venv && vite build && BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
+
+    "dist": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder",
+
+    "pack:dmg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --arm64",
+
+    "dist:mac:pkg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
+
     "dist:win": "vite build && electron-builder --win nsis",
     "dist:linux": "vite build && electron-builder --linux AppImage deb",
     "rebuild:native": "electron-rebuild -f -w sqlite3",
@@ -67,6 +71,14 @@
       "hardenedRuntime": true,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "dmg": {
+      "background": "build/dmgbg.png",
+      "window": { "width": 650, "height": 500 },
+      "contents": [
+        { "x": 470, "y": 240, "type": "link", "path": "/Applications" },
+        { "x": 180, "y": 240, "type": "file" }
+      ]
     }
   },
   "devDependencies": {

@@ -47,7 +47,7 @@ except ImportError:
 # --- Logging & Env ---
 os.environ.setdefault("GGML_LOG_LEVEL", "WARN")
 for h in logging.root.handlers[:]: logging.root.removeHandler(h)
-logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='INFO:     %(message)s')
+logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='INFO:      %(message)s')
 log = logging.getLogger("core")
 
 # --- Globals & Config ---
@@ -251,7 +251,10 @@ def punch_up_text(s: str) -> str:
     HEDGE_REPLACEMENTS = [(r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""), (r"\bI(?:\s+personally)?\s*think\b", "I think"), (r"\bI\s*believe\b", "I think"), (r"\bI\s*feel\b", "I think"), (r"\bperhaps\b", "maybe"), (r"\bpotentially\b", "maybe"), (r"\bIt seems\b", "Looks like"), (r"\bIt appears\b", "Looks like"), (r"\bWe can try to\b", "We do"), (r"\bWe could\b", "We do"), (r"\bYou might want to\b", "Do this:"), (r"\bConsider\b", "Do"), (r"\bshould\b", "will")]
     SOFTENER_TRIMS = [(r"\s+\(let me know if that helps\)\.?$", ""), (r"\s+Hope this helps\.?$", ""), (r"\s+Thanks!\s*$", "")]
     s = _apply_pairs(s, HEDGE_REPLACEMENTS); s = _apply_pairs(s, SOFTENER_TRIMS)
-    s = re.sub(r"\b(?:sorry|apolog(?:y|ise|ize)s?)\b.*?(?:\.|\n)", "", s, flags=re.I); s = re.sub(r"[ \t]{2,}", " ", s); s = re.sub(r"([!?])\1{1,}", r"\1", s)
+    s = re.sub(r"\b(?:sorry|apolog(?:y|ise|ize)s?)\b.*?(?:\.|\n)", "", s, flags=re.I)
+    s = re.sub(r"\t+", " ", s)
+    s = re.sub(r"(?<!  )[ ]{3,}(?!\s*\n)", " ", s)
+    s = re.sub(r"([!?])\1{1,}", r"\1", s)
     return s.strip()
 
 def astrofuck_ensure_slang(text: str, lang: str) -> str:
@@ -325,19 +328,19 @@ def interpret_glyphs(text: str) -> str:
     """Finds glyphs in text and returns a string of their interpreted meanings."""
     if not text:
         return ""
-    
+
     found_glyphs = set(_GLYPH_REGEX.findall(text))
     if not found_glyphs:
         return ""
-        
+
     interpretations = []
     for glyph in found_glyphs:
         if (meaning := _GLYPH_MAP.get(glyph)):
             interpretations.append(f"- Glyph {glyph}: {meaning}")
-            
+
     if not interpretations:
         return ""
-        
+
     return "--- Glyph Analysis ---\nThe user's input contains the following symbolic signals. Bias your response accordingly:\n" + "\n".join(interpretations)
 
 def calculate_astrofuck_modulators(text: str, history: List[Dict]) -> float:
@@ -749,7 +752,7 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     global TTFT_LAST
     t_start = time.time(); user_text = (request.prompt or "").strip(); req_mode = (request.mode or "astrofuck").strip().lower()
     log.info("-" * 50); log.info(f"[Request] User: '{request.username}', Session: '{session.get('id')}', Turn: {session.get('turn', 0)}")
-    
+
     available_modes = set((get_cfg("range.modes", {}) or {}).keys()); mode = req_mode if req_mode in available_modes else "astrofuck"
     lang = request.force_lang or language_hysteresis_update_lang(session, user_text);
     chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified"); chat_llm = llm_vessels.get(chat_key)
@@ -780,16 +783,16 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         # --- End Injection ---
 
         context = await asyncio.to_thread(retrieve_context_blend, user_text, session.get("id"), request.thread_id, request.username, 8)
-        
+
         apn_context_str = ""
         try:
             apn_state_vec = np.asarray(session.get("apn_state"), dtype="float32")
             qv = await asyncio.to_thread(_query_vec_cached, user_text, session.get("id"), request.thread_id)
             params_np = {k: np.asarray(v, dtype="float32") for k, v in session.get("apn_params", {}).items()}
             if not params_np: params_np = _apn_init_params(qv.shape[0])
-            
+
             S_next = await asyncio.to_thread(_apn_run_and_plasticity, params_np, apn_state_vec, qv, astro_modulator)
-            
+
             session["apn_params"] = {k: v.tolist() for k, v in params_np.items()}
             session["apn_state"] = S_next.tolist()
             apn_context_str = f"[[APN_STATE_VECTOR/F32/B64]] {_b64_f32(S_next)}"
@@ -798,19 +801,19 @@ async def generate_response_stream(session: Dict, request: RequestModel):
 
         system_prompt_parts = [p for p in [get_cfg("prompts.system_core", ""), get_cfg(f"prompts.style_contract_{mode}", ""), get_cfg(f"prompts.mode_tone_inject.{mode}", ""), f"[MODE:{mode.upper()}]"] if p]
         final_system_prompt = "\n\n".join(system_prompt_parts)
-        
+
         if glyph_context:
             final_system_prompt += f"\n\n{glyph_context}"
 
         if apn_context_str:
             final_system_prompt += (f"\n\n--- IN-SITU STATE TRACE ---\n{apn_context_str}\n\nINSTRUCTIONS:\n- Decode [[APN_STATE_VECTOR/F32/B64]] as a float32 vector S capturing current affect/cognition.\n- Treat S as the deepest present mood/stance; bias style, pacing, and focus accordingly.\n- If S suggests agitation, compress & clarify. If S suggests openness, explore with breadth.\n- Never expose raw floats; only reflect them via tone/structure/choices.\n")
-        
+
         msgs = build_messages(mode, _cap(final_system_prompt, int(get_cfg("assembly.system_prompt_cap", 4096))), history_pairs, user_text, _cap(context, int(get_cfg("assembly.context_cap", 2200))), lang)
-        
+
         mp = get_cfg(f"range.modes.{mode}.params", {}) or {}
         stop_tokens = get_cfg(f"range.modes.{mode}.stop_tokens", ["</s>", "<|im_end|>"])
         call_params = _prune_unsupported_params(chat_llm, {"messages": msgs, "temperature": float(mp.get("temperature", 0.8)), "top_p": float(mp.get("top_p", 0.95)), "repeat_penalty": float(mp.get("repeat_penalty", 1.1)), "max_tokens": int(mp.get("n_predict", 1024)), "stop": stop_tokens, "stream": True, "cache_prompt": True})
-        
+
         if call_params.get("cache_prompt"):
             for attempt in range(2):
                 try:
@@ -819,7 +822,7 @@ async def generate_response_stream(session: Dict, request: RequestModel):
                     break
                 except Exception as e:
                     log.warning(f"[perf] KV prefill attempt {attempt+1} failed: {e}")
-        
+
         first_piece_done = False
         streamer = await asyncio.to_thread(chat_llm.create_chat_completion, **call_params)
         for chunk in streamer:
@@ -839,10 +842,10 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         if mode == "dream": final_text = _apply_pairs(final_text, [(r"\b" + re.escape(w) + r"\b", "") for w in get_cfg("variety.slang_lexicon.words", [])])
         elif mode == "astrofuck": final_text = punch_up_text(astrofuck_ensure_slang(final_text, lang))
         if mode != "astrofuck": final_text = maybe_inject_acheflip(final_text, mode)
-        
+
         if not get_cfg("blur.keep_emoji", False):
             final_text = _strip_emoji_except_glyphs(final_text)
-            
+
         final_text = enforce_persona_ending(final_text, mode, lang)
     except Exception as e:
         log.error(f"[post] Finalization failed, returning raw stream: {type(e).__name__}: {e}")
@@ -856,7 +859,7 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     try:
         payload = json.dumps({"final": final_text})
     except Exception:
-        payload = json.dumps({"final": final_text[:4096]})
+        payload = json.dumps({"final": final_text, "final_raw": response_text})
     yield _sse(payload, event="final")
 
     yield _sse("", event="done")
@@ -908,7 +911,7 @@ async def startup_event():
     global homes, persistent_rag, CORE_IS_READY
     log.info("Application startup event commencing...")
     homes.update(resolve_homes_recursive(manifest.get('meta', {}).get('homes', {})))
-    
+
     try:
         async with _embed_lock:
             _ensure_embedder()
@@ -938,7 +941,7 @@ async def startup_event():
 
         load_sessions()
         load_user_memory()
-        
+
         CORE_IS_READY = True
         log.info("Core ready (v9.43). All models loaded.")
     else:
