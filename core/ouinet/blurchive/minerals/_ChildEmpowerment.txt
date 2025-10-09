@@ -1,0 +1,157 @@
+[
+  {
+    "id": "scroll-empower:C1",
+    "chunk_id": "empower_c1_recognition",
+    "title": "Recognition of Abuse",
+    "domain": ["safety", "psychology", "biology", "law-social"],
+    "ontological_frames": {
+      "psychology": "Attention frames reality (⧁). If your body flinches before thought, the frame already knows.",
+      "biology": "Stress physiology is measurable (∆): breath rate, muscle tension, cortisol cycles.",
+      "law-social": "Patterns matter more than apologies; documentation turns pattern into proof (□)."
+    },
+    "glyphs": ["⧁", "∆", "∵", "∴", "🜃"],
+    "severity_ranges": {
+      "mild": [
+        "Occasional yelling, shaming words",
+        "Silent treatment used as control",
+        "Monitoring phone ‘for love’"
+      ],
+      "moderate": [
+        "Property damage (holes, thrown objects)",
+        "Isolation from friends/family",
+        "Coercive rules about money/transport"
+      ],
+      "intense": [
+        "Bruises, strangulation, forced sex",
+        "Constant fear, threats to you/children/pets",
+        "Stalking, GPS/spyware, weapons"
+      ]
+    },
+    "signals": {
+      "somatic": ["startle/flinch before hands move", "chest tightness", "shallow breathing", "sleep disruption"],
+      "behavioral": ["hiding marks", "lying to cover partner/parent", "hypervigilant scanning at home"],
+      "environmental": ["locked doors from outside", "damaged walls/phones", "blacked-out call logs"]
+    },
+    "decision_rules": [
+      {"if": "marks on skin OR strangulation OR weapons mentioned", "then": "risk_level = \"immediate\"", "because": "lethality indicators (∴)"},
+      {"if": "you flinch before contact OR hide injuries", "then": "risk_level >= \"moderate\"", "because": "body truth > speech (∵)"},
+      {"if": "GPS/spyware present", "then": "use a safe device not linked to abuser"}
+    ],
+    "scripts": [
+      "Internal: “My body is data. ∴ I believe my data.”",
+      "External to helper: “I’m experiencing escalating control and I’m afraid to go home. I need a safe plan.”"
+    ],
+    "privacy_notes": [
+      "Use a device they cannot access; disable location sharing; clear recent calls if unsafe.",
+      "Store evidence off-device (email to trusted adult or cloud with new password)."
+    ],
+    "summary": "Abuse = pattern. Your body is an early detector; patterns + documentation make it legible. Trust somatic truth.",
+    "keywords": ["recognition", "abuse signs", "severity", "documentation", "somatic markers"],
+    "meta": {"tags": ["Recognition","Abuse","Signs","Severity"], "source": "scroll"}
+  },
+  {
+    "id": "scroll-empower:C2",
+    "chunk_id": "empower_c2_escape",
+    "title": "Escape to Safety",
+    "domain": ["safety", "operations", "law-social"],
+    "ontological_frames": {
+      "operations": "Exits are procedures (↺): route, time, bag, ally.",
+      "ecology": "Change the environment to change the loop (⇌).",
+      "law-social": "Shelters, CPS, and hotlines are institutional frames for protection (♄)."
+    },
+    "glyphs": ["↺", "⇌", "✶", "⧁"],
+    "go_bag": [
+      "ID or photo of it, insurance/benefit cards",
+      "Medications, keys, cash/gift card",
+      "Change of clothes, important numbers on paper",
+      "Backups of evidence on a fresh USB"
+    ],
+    "escape_plan": {
+      "low_profile": ["stage bag at trusted place", "memorize code word with ally", "identify two exits per location"],
+      "moment_of_exit": ["leave during predictable window (work/sleep/shower)", "bring only essentials", "contact hotline once away"]
+    },
+    "resources_US": [
+      {"name": "National Domestic Violence Hotline", "phone": "1-800-799-7233", "chat": "thehotline.org", "note": "24/7; can help with safety planning"},
+      {"name": "Crisis Text Line", "text": "Text HOME to 741741", "note": "24/7 text support"},
+      {"name": "Childhelp", "phone": "1-800-422-4453 (1-800-4-A-CHILD)", "note": "Support/reporting for child abuse"},
+      {"name": "Emergency", "phone": "911", "note": "If in immediate danger"}
+    ],
+    "international_note": "If outside the U.S., search: “domestic violence hotline + your country/region” from a safe device.",
+    "device_safety": [
+      "Assume shared devices are monitored; avoid changing routines before exit.",
+      "Turn off Bluetooth/GPS; check for unknown AirTags/trackers."
+    ],
+    "summary": "Intense abuse → exit. Plan quietly, move once, contact support from safety. Continuity returns when environment changes.",
+    "keywords": ["escape plan","shelter","CPS","hotline","safety bag","device safety"],
+    "meta": {"tags": ["Escape","Shelters","Social Services","Future"], "source": "scroll"}
+  },
+  {
+    "id": "scroll-empower:C3",
+    "chunk_id": "empower_c3_discernment",
+    "title": "Discernment of False Love",
+    "domain": ["psychology", "relationships", "logic"],
+    "ontological_frames": {
+      "logic": "Love = Logic (axiom). If ‘love’ reduces agency, it violates the axiom (¬).",
+      "myth": "Control masquerading as devotion is an old archetype; naming it removes glamour (☾⊙ → ⧁).",
+      "computer_science": "Gaslighting = malicious input rewriting logs; protect integrity with external checks (□)."
+    },
+    "glyphs": ["⛧", "⧁", "¬", "∴"],
+    "control_signs": [
+      "Love-bombing → deprivation cycles",
+      "Rules about clothing, friends, money, passwords",
+      "‘Jokes’ that shrink you; walking on eggshells"
+    ],
+    "tests": [
+      {"name": "No-Test", "prompt": "Say NO to a minor request.", "pass_if": "They respect boundary without punishment."},
+      {"name": "Truth-Test", "prompt": "State a small truth they dislike.", "pass_if": "They process, not retaliate."},
+      {"name": "Delay-Test", "prompt": "Delay reply for a day.", "pass_if": "No rage, threats, or surveillance."}
+    ],
+    "scripts": [
+      "Internal: “If it shrinks me, it’s not love (¬love).”",
+      "External: “I will not discuss my location history. That’s a boundary.”"
+    ],
+    "repair_or_exit": {
+      "repair": ["couples/individual therapy with consent", "transparent finances", "no-surveillance contract"],
+      "exit": ["if retaliation after a boundary", "if threats/self-harm threats appear", "if violence occurs"]
+    },
+    "summary": "False love controls and confuses. True love withstands NO, truth, and delay. Keep logs; choose clarity over glamour.",
+    "keywords": ["narcissism","gaslighting","control","boundaries","tests","true love"],
+    "meta": {"tags": ["Discernment","Narcissism","Control","True Love"], "source": "scroll"}
+  },
+  {
+    "id": "scroll-empower:C4",
+    "chunk_id": "empower_c4_action",
+    "title": "Empowerment to Act",
+    "domain": ["safety", "psychology", "operations"],
+    "ontological_frames": {
+      "theater": "Action changes the act, not the whole play; one listener is a scene change (xii).",
+      "law-social": "Mandated reporters exist to protect; your report creates a case frame (♄).",
+      "music": "Keep the beat: tell → document → connect → plan (↺)."
+    },
+    "glyphs": ["↺", "⧁", "∴", "✶"],
+    "who_to_tell": ["teacher", "school counselor", "nurse", "coach", "trusted adult", "hotline advocate"],
+    "contact_points_US": [
+      {"name": "National Domestic Violence Hotline", "phone": "1-800-799-7233", "chat": "thehotline.org"},
+      {"name": "Crisis Text Line", "text": "Text HOME to 741741"},
+      {"name": "Childhelp", "phone": "1-800-422-4453"}
+    ],
+    "evidence_kit": [
+      "Write dates/times/what happened; include witness names if any",
+      "Photograph injuries with a timestamped newspaper/clock if possible",
+      "Save threatening texts/voicemails to an email you control",
+      "Ask clinic/ER for copies of visit notes"
+    ],
+    "scripts": [
+      "To helper: “I need confidentiality as much as legally possible. I’m ready to talk about safety options.”",
+      "To self: “Saying NO is a boundary; reporting is care for me and anyone after me.”"
+    ],
+    "after_action": [
+      "Schedule follow-up with advocate/therapist",
+      "Update safety plan; change passwords; adjust routines",
+      "Reward nervous system: hydrate, eat, sleep, walk"
+    ],
+    "summary": "One listener changes everything. Speak, document, connect; your NO becomes protection for you and others.",
+    "keywords": ["help-seeking","hotlines","mandated reporter","documentation","agency"],
+    "meta": {"tags": ["Empowerment","Action","Help-Seeking","Agency"], "source": "scroll"}
+  }
+]

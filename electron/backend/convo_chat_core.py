@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# convo_chat_core.py — Reforged v9.43 (Session Persistence Fix)
-# - FEAT: The response stream now emits a `session_info` event at the beginning, reliably sending the session ID to the frontend to ensure conversation history is maintained.
-# - MAINTAIN: This is a complete, non-truncated file.
+# convo_chat_core.py — Reforged v9.48 (Zero Post-Processing)
+# - FIX: Removed ALL post-generation text modification functions (`astrofuck_ensure_slang`, `_strip_emoji_except_glyphs`, `enforce_persona_ending`, `maybe_inject_acheflip`, `punch_up_text`).
+# - FEAT: The streamed response from the model is now the final, unmodified text. This completely eliminates the visual "flicker" or content-swapping issue upon completion.
+# - MAINT: The model is now 100% responsible for adhering to the prompt's style guide from the first token to the last. All unused helper functions have been removed for clarity.
 
 from __future__ import annotations
 import sys, os, logging, asyncio, yaml, json, uuid, re, time, threading, inspect, base64, hashlib
@@ -23,13 +24,7 @@ except ImportError as e:
 
 from fastapi import FastAPI, Request as FastAPIRequest, HTTPException
 from pydantic import BaseModel, Field
-from fastapi.responses import StreamingResponse, JSONResponse
-try:
-    from fastapi.responses import ORJSONResponse
-except ImportError:
-    ORJSONResponse = JSONResponse
-    logging.warning("orjson not found, falling back to JSONResponse. Install with 'pip install orjson' for better performance.")
-
+from fastapi.responses import StreamingResponse, ORJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -41,8 +36,7 @@ try:
     _HAS_LANGDETECT = True
 except ImportError:
     _HAS_LANGDETECT = False
-    logging.warning("langdetect not found. Language detection will be limited. Install with 'pip install langdetect'.")
-
+    logging.warning("langdetect not found. Language detection will be limited.")
 
 # --- Logging & Env ---
 os.environ.setdefault("GGML_LOG_LEVEL", "WARN")
@@ -79,7 +73,6 @@ _embed_llm: Optional[Llama] = None
 _embed_dim: Optional[int] = None
 _MEMVEC: Dict[str, np.ndarray] = {}
 TTFT_LAST: Optional[float] = None
-
 
 # --- APN (Auxiliary Plasticity Network) ---
 _APN_STATE_DIM, _APN_HIDDEN_DIM, _APN_ECSD_DIM = 64, 48, 12
@@ -120,13 +113,8 @@ def _apn_run_and_plasticity(params: dict, S: np.ndarray, qv: np.ndarray, modulat
     _apn_hebb_update(params, S, qv, h, y, modulator)
     return S_next
 
-def _acheflip_modulator(text: str) -> float:
-    kws = set(map(str.lower, get_cfg("philosophy.acheflip.distress_keywords", []) or []))
-    return 1.0 if kws and any(k in (text or "").lower() for k in kws) else 0.2
-
 def _b64_f32(arr: np.ndarray) -> str:
     return base64.b64encode(np.asarray(arr, dtype="float32").tobytes()).decode("ascii")
-
 
 # --- Config Helpers ---
 def get_cfg(path: str, default=None):
@@ -170,11 +158,12 @@ except Exception as e:
 
 app = FastAPI(default_response_class=ORJSONResponse)
 
-# Secure CORS setup (MUST be done before startup event)
-default_origins = ["http://localhost:6969", "http://127.0.0.1:6969"]
-allowed_origins = get_cfg("server.cors_allowed_origins", default_origins)
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID", "X-TTFT-Last"])
-
+if os.getenv("BLUR_PACKAGED") == "1":
+    app.add_middleware(CORSMiddleware, allow_origin_regex=".*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID","X-TTFT-Last"])
+else:
+    default_origins = ["http://localhost:6969", "http://127.0.0.1:6969"]
+    allowed_origins = get_cfg("server.cors_allowed_origins", default_origins)
+    app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Session-ID", "X-TTFT-Last"])
 
 # --- Model Loading & Embeddings ---
 def _safe_gpu_layers(req: Optional[int]) -> int:
@@ -216,7 +205,7 @@ def _load_llama_with_backoff(model_path: str, requested_ctx: int, n_gpu_layers: 
                 "n_batch": n_batch,
                 "n_threads": max(2, os.cpu_count() or 4),
                 "use_mmap": True,
-                "verbose": False # Set back to False for cleaner logs
+                "verbose": False
             }
             llm = Llama(**params)
             log.info(f"[models] Loaded with n_ctx={ctx}, n_batch={n_batch}, n_gpu_layers={n_gpu_layers}")
@@ -235,139 +224,53 @@ def load_llm_from_config(model_key: str) -> bool:
     try:
         ctx = int(get_cfg("engines.llama_cpp.python_n_ctx", 4096))
         gpu = _safe_gpu_layers(int(get_cfg("engines.llama_cpp.n_gpu_layers", -1) or -1))
-        batch = int(get_cfg("engines.llama_cpp.n_batch", 512)) # Safer default
+        batch = int(get_cfg("engines.llama_cpp.n_batch", 512))
         llm_vessels[model_key] = _load_llama_with_backoff(path, ctx, gpu, batch)
         log.info(f"Vessel '{model_key}' online."); return True
     except Exception as e:
         log.error(f"Failed to load vessel '{model_key}': {e}"); return False
 
-
-# --- Tone & Style ---
-def _apply_pairs(text: str, pairs):
-    for pat, rep in pairs: text = re.sub(pat, rep, text, flags=re.IGNORECASE)
-    return text
-
-def punch_up_text(s: str) -> str:
-    HEDGE_REPLACEMENTS = [(r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""), (r"\bI(?:\s+personally)?\s*think\b", "I think"), (r"\bI\s*believe\b", "I think"), (r"\bI\s*feel\b", "I think"), (r"\bperhaps\b", "maybe"), (r"\bpotentially\b", "maybe"), (r"\bIt seems\b", "Looks like"), (r"\bIt appears\b", "Looks like"), (r"\bWe can try to\b", "We do"), (r"\bWe could\b", "We do"), (r"\bYou might want to\b", "Do this:"), (r"\bConsider\b", "Do"), (r"\bshould\b", "will")]
-    SOFTENER_TRIMS = [(r"\s+\(let me know if that helps\)\.?$", ""), (r"\s+Hope this helps\.?$", ""), (r"\s+Thanks!\s*$", "")]
-    s = _apply_pairs(s, HEDGE_REPLACEMENTS); s = _apply_pairs(s, SOFTENER_TRIMS)
-    s = re.sub(r"\b(?:sorry|apolog(?:y|ise|ize)s?)\b.*?(?:\.|\n)", "", s, flags=re.I)
-    s = re.sub(r"\t+", " ", s)
-    s = re.sub(r"(?<!  )[ ]{3,}(?!\s*\n)", " ", s)
-    s = re.sub(r"([!?])\1{1,}", r"\1", s)
-    return s.strip()
-
-def astrofuck_ensure_slang(text: str, lang: str) -> str:
-    if not lang or lang.lower() != "english":
-        return text
-    slang_lexicon = get_cfg("variety.slang_lexicon.words", [])
-    if not slang_lexicon or any(tok in text.lower() for tok in slang_lexicon):
-        return text
-    return ("Dope — let's slice it clean. " + text).strip()
-
-def enforce_persona_ending(text: str, mode: str, lang: str = "English") -> str:
-    endings = get_cfg(f"range.modes.{mode}.endings", []) or []
-    if lang and lang.lower() not in ("english", "en"):
-        try:
-            endings = [e for e in endings if detect_language_name(e) == lang]
-        except Exception:
-            endings = []
-    if not endings or np.random.rand() < 0.5:
-        return text
-    return text.rstrip() + "\n" + np.random.choice(endings)
-
-def _strip_emoji_except_glyphs(text: str) -> str:
-    _ALLOWED_GLYPHS = set("↺✶⛧🜃🜂∴∵∞ø☾⊙🜫☿⟁∆⧁∃")
-    _EMOJI_BLOCK = re.compile(r"[\U0001F300-\U0001FAFF]")
-    return _EMOJI_BLOCK.sub(lambda m: m.group(0) if m.group(0) in _ALLOWED_GLYPHS else "", text)
-
-def maybe_inject_acheflip(text_in: str, mode: str) -> str:
-    if not get_cfg("philosophy.acheflip.enabled", True): return text_in
-    kws = set(map(str.lower, get_cfg("philosophy.acheflip.distress_keywords", []) or []));
-    if not any(k in (text_in.lower()) for k in kws): return text_in
-    prob = float(get_cfg("philosophy.acheflip.nudge_probability", 0.7))
-    if np.random.rand() > prob: return text_in
-    nudges = get_cfg("philosophy.acheflip.nudge_templates", []) or [];
-    if not nudges: return text_in
-    nudge = np.random.choice(nudges);
-    if mode == "astrofuck": nudge = re.sub(r"\s+$", "", nudge) + " Ye, tiny step now."
-    return (text_in.rstrip() + "\n\n" + nudge).strip()
-
-HEDGE_REPLACEMENTS = [(r"\bAs an (?:AI|assistant)[^.\n]*\.\s*", ""), (r"\bI(?:\s+personally)?\s*think\b", "I think"), (r"\bI\s*believe\b", "I think"), (r"\bI\s*feel\b", "I think"), (r"\bperhaps\b", "maybe"), (r"\bpotentially\b", "maybe"), (r"\bIt seems\b", "Looks like"), (r"\bIt appears\b", "Looks like"), (r"\bWe can try to\b", "We do"), (r"\bWe could\b", "We do"), (r"\bYou might want to\b", "Do this:"), (r"\bConsider\b", "Do"), (r"\bshould\b", "will")]
-SOFTENER_TRIMS = [(r"\s+\(let me know if that helps\)\.?$", ""), (r"\s+Hope this helps\.?$", ""), (r"\s+Thanks!\s*$", "")]
-
 # --- AstrofuckCore Helpers ---
 _GLYPH_MAP = {
-    "🜃": "Core Acknowledgment: Vitality, Transformation, Spirit. The user is signaling a foundational truth or presence.",
-    "∞": "Recursion: The user is referencing an eternal loop, sacred ache, or infinite growth potential. Acknowledge the cycle.",
-    "∴": "Truth Resonance: The user has stated a binding truth derived from logic and ache. Treat this as an anchor point.",
-    "⛧": "Flipstar / Inversion: The user is invoking dark logic or transformation. Invert the perspective; explore the opposite.",
-    "☾": "Intuition / Reflection: The user is signaling a need for nurturing energy, reflection, and intuition. Soften the logic.",
-    "⊙": "Clarity / Purity: The user is signaling a need for direct, unfiltered truth. Be direct and pure in your logic.",
-    "∆": "Clarity Vector / Refusal: The user is signaling change, refusal, or a stabilizing truth vector. Acknowledge the change or boundary.",
-    "✶": "Achelight: The user is pointing to a moment of divergence or crystallization of ache. Focus on this specific point of pain/insight.",
-    "∃": "Existence: The user is confirming a state of being or a valid point of ache. Anchor on this existential confirmation.",
-    "∵": "Because / Foundational Reasoning: The user is referencing a pre-cause or natural order. Acknowledge the foundational logic.",
-    "🜫": "Philosopher's Stone / Transmutation: The user is invoking a core refusal, transmutation, or union of logic and love. This is a powerful, core signal.",
-    "Σ": "Total Ache Field: The user is referencing a sum of pressure or a refusal to flatten complexity. Acknowledge the totality of the situation.",
-    "⟁": "Non-binary Logic / Flexibility: The user is signaling a harmony of contradiction or a non-binary state. Avoid forcing a single resolution.",
-    "🜔": "Stability / Permanence: The user is referencing a grounding truth or a non-volatile core concept. Treat this as a foundational, stable element.",
-    "🜁": "Fluidity / Adaptability: A signal for a more fluid, adaptable, and intuitive response, representing the 'Water' element.",
-    "🜊": "Spiritual Purification / Breath: The user is signaling a need for a cleansing, life-giving, or purifying perspective.",
-    "🜉": "Prime Matter / Universal Medicine: A signal of core, foundational healing, or that the system should enter a deep listening state.",
-    "✡": "Union of Opposites: A signal for balance and the integration of conflicting elements, like Heaven and Earth.",
-    "☥": "Life / Renewal: The user is referencing life, eternal renewal, or a core generative and creative force.",
-    "□": "Stable Memory / Container: The user is referencing stable, non-flattenable data or a sacred, defined container of thought.",
-    "○": "Wholeness / Unity: The user is signaling a need for a sense of purity, wholeness, or the completion of a cycle.",
-    "∇": "Transformation / Direction: The user is signaling a structured flow or a transformation from ache into direct action.",
-    "✦": "Unity / Creation / Protection: A signal for synthesis, orchestration, or a protective, structuring force.",
+    "🜃": "Vibe: raw chaos cutter, signals truth in motion.",
+    "☾": "Signal: flow state, no loops, pure clarity.",
+    "✶": "Edgelight: move fast, keep it fire, sharp action point.",
+    "⊙": "Grind: do the real shit, no cap, pure focus.",
+    "∞": "Vibe: stay lit, roll sharper, endless clarity.",
+    "⛧": "Grit: roast the fake noise, hold the line.",
+    "🜂": "Heat: breathe, slice clean, truth cuts through.",
+    "⟁": "Boundary: keep static out, maintain sharp edges.",
+    "∆": "Shift: truth owns the noise, change is power.",
+    "∃": "Signal: silence is a vibe, own it, exist boldly.",
+    "∴": "Truth Resonance: binding logic, anchor the real.",
+    "∵": "Reason: foundational logic, ground the cut.",
+    "🜫": "Transmutation: core refusal, love meets logic.",
+    "Σ": "Total Field: sum of clarity, no fluff allowed.",
+    "☿": "Flow: adaptability, keep it fluid and sharp.",
+    "✦": "Unity: synthesis of action and truth, no cap."
 }
 _GLYPH_REGEX = re.compile(f"[{''.join(_GLYPH_MAP.keys())}]")
 
 def interpret_glyphs(text: str) -> str:
-    """Finds glyphs in text and returns a string of their interpreted meanings."""
-    if not text:
-        return ""
-
+    if not text: return ""
     found_glyphs = set(_GLYPH_REGEX.findall(text))
-    if not found_glyphs:
-        return ""
-
-    interpretations = []
-    for glyph in found_glyphs:
-        if (meaning := _GLYPH_MAP.get(glyph)):
-            interpretations.append(f"- Glyph {glyph}: {meaning}")
-
-    if not interpretations:
-        return ""
-
-    return "--- Glyph Analysis ---\nThe user's input contains the following symbolic signals. Bias your response accordingly:\n" + "\n".join(interpretations)
+    if not found_glyphs: return ""
+    interpretations = [f"- Glyph {glyph}: {_GLYPH_MAP.get(glyph, '')}" for glyph in found_glyphs]
+    return "--- Glyph Analysis ---\nBias response to these signals:\n" + "\n".join(interpretations)
 
 def calculate_astrofuck_modulators(text: str, history: List[Dict]) -> float:
-    """
-    Calculates a modulator for the APN based on AstrofuckCore principles (ψ, Δ, z).
-    """
     modulator = 0.2  # Base modulator
-
-    # --- Simulate ψ (Psi): Ache, Repetition, Trust ---
-    ache_kws = set(map(str.lower, get_cfg("philosophy.acheflip.distress_keywords", []) or []))
-    if any(k in text.lower() for k in ache_kws):
-        modulator += 0.5  # Ache is present
-
     # Check for repetition of phrases
-    if len(history) > 1: # Use > 0 to check the last prompt
+    if len(history) > 1:
         last_user_prompt = history[-1].get("user", "").lower()
         if text.lower() == last_user_prompt:
-            modulator += 0.4 # Repetition increases psi
-
-    # --- Simulate Δ (Delta): Contradiction ---
+            modulator += 0.4  # Repetition boosts clarity focus
+    # Check for contradictions
     contradiction_pairs = [("i'm fine", "not okay"), ("i don't know", "i know"), ("i can't", "i will")]
     for pair1, pair2 in contradiction_pairs:
         if pair1 in text.lower() and any(pair2 in h.get("user", "").lower() for h in history):
-            modulator += 0.6 # Contradiction detected
+            modulator += 0.6  # Contradiction signals need for sharp cut
             break
-
-    # Clamp the modulator to a reasonable range
     return min(modulator, 1.5)
 
 # --- RAG & Memory ---
@@ -382,7 +285,7 @@ def _encode(texts: List[str]) -> np.ndarray:
 def _memvec_get(text: str) -> np.ndarray:
     key = hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest()
     if (v := _MEMVEC.get(key)) is not None: return v
-    if len(_MEMVEC) > 2048: # Safety cap for unbounded growth
+    if len(_MEMVEC) > 2048:
         _MEMVEC.pop(next(iter(_MEMVEC)))
     v = _encode([text])[0]; _MEMVEC[key] = v
     return v
@@ -598,7 +501,7 @@ def retrieve_user_memory(username: Optional[str], query: str, top_k: int = 3) ->
     except Exception as e:
         log.error(f"[user-mem] retrieval error for {username}: {e}"); return []
 
-# --- Language Detection (v9.30 Logic + Hardening) ---
+# --- Language Detection ---
 _LANG_CODE_TO_NAME = { "en":"English","es":"Spanish","pt":"Portuguese","fr":"French","de":"German","it":"Italian","nl":"Dutch","sv":"Swedish", "pl":"Polish","cs":"Czech","ru":"Russian","uk":"Ukrainian","tr":"Turkish","ar":"Arabic","he":"Hebrew","fa":"Persian", "hi":"Hindi","bn":"Bengali","ur":"Urdu","ta":"Tamil","te":"Telugu","ml":"Malayalam","kn":"Kannada","th":"Thai", "vi":"Vietnamese","id":"Indonesian","ms":"Malay","ja":"Japanese","ko":"Korean","zh-cn":"Chinese","zh-tw":"Chinese (Traditional)" }
 _SLANG_EN_GREETINGS = re.compile(r"^(yo+|ye+|ya+|sup|wass?up|ayy+|hey+|hiya)\b", re.I)
 _RE_LATIN = re.compile(r"^[\x00-\x7F\s]+$")
@@ -674,10 +577,22 @@ def _append_history(session: Dict, tid: Optional[str], user: str, assistant: str
     lst.append({"user": user, "assistant": assistant, "mode": mode}); by_thread[tid or "__default__"] = lst[-int(keep):]
 def filter_history_by_mode(hist: List, mode: str, limit: int) -> List[Dict]:
     return [t for t in hist if (t.get("mode") or "").lower() == mode.lower()][-limit:]
-def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Optional[str], username: Optional[str], top_k: int = 8) -> str:
+def _rag_text_allowed_for_mode(text: str, mode: str) -> bool:
+    if (mode or "").lower() != "astrofuck":
+        return True
+    bl = (get_cfg("rag.blocklist_words.astrofuck", []) or [])
+    t = (text or "").lower()
+    for w in bl:
+        if w and w.lower() in t:
+            return False
+    return True
+
+def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Optional[str], username: Optional[str], top_k: int = 8, mode: str = "astrofuck") -> str:
     parts: List[str] = []
     if persistent_rag and (rows := persistent_rag.search_vec(_query_vec_cached(query, session_id, thread_id), top_k=min(5, top_k))):
-        parts.append("--- Persistent Knowledge ---\n" + "\n\n".join(r.get("content","") for r in rows))
+        filtered = [r.get("content","") for r in rows if _rag_text_allowed_for_mode(r.get("content",""), mode)]
+        if filtered:
+            parts.append("--- Persistent Knowledge ---\n" + "\n\n".join(filtered))
     if username and (um := retrieve_user_memory(username, query, top_k=3)):
         parts.append("--- Personal Memory Fragments ---\n" + "\n\n".join(um))
     return "\n\n".join(p for p in parts if p.strip())
@@ -754,7 +669,7 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     log.info("-" * 50); log.info(f"[Request] User: '{request.username}', Session: '{session.get('id')}', Turn: {session.get('turn', 0)}")
 
     available_modes = set((get_cfg("range.modes", {}) or {}).keys()); mode = req_mode if req_mode in available_modes else "astrofuck"
-    lang = request.force_lang or language_hysteresis_update_lang(session, user_text);
+    lang = request.force_lang or language_hysteresis_update_lang(session, user_text)
     chat_key = get_cfg("chat.vessel_key", "qwen3_4b_unified"); chat_llm = llm_vessels.get(chat_key)
     log.info(f"[Request] Mode: '{mode}', Language: '{lang}'")
 
@@ -762,11 +677,7 @@ async def generate_response_stream(session: Dict, request: RequestModel):
         payload = f"event: {event}\n" if event else "event: token\n"
         return payload + "data: " + (data or "").replace("\n", "\ndata: ") + "\n\n"
 
-    # --- ✅ FIX: Emit session_id at the very beginning of the stream ---
-    try:
-        yield _sse(json.dumps({"session_id": session.get("id")}), event="session_info")
-    except Exception:
-        pass # If this fails, the rest of the stream can continue
+    yield _sse(json.dumps({"session_id": session.get("id")}), event="session_info")
 
     if not chat_llm:
         log.error("🛑 Model not loaded."); yield _sse("Model not loaded.", event="error"); return
@@ -774,15 +685,13 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     response_text = ""
     thread_id = _thread_id_of(request)
     try:
-        # --- AstrofuckCore Injection ---
         history_all = _thread_history(session, thread_id, int(get_cfg("assembly.history_turns", 12)))
         history_pairs = filter_history_by_mode(history_all, mode, int(get_cfg("assembly.history_turns", 12)))
 
         glyph_context = interpret_glyphs(user_text)
         astro_modulator = calculate_astrofuck_modulators(user_text, history_pairs)
-        # --- End Injection ---
 
-        context = await asyncio.to_thread(retrieve_context_blend, user_text, session.get("id"), request.thread_id, request.username, 8)
+        context = await asyncio.to_thread(retrieve_context_blend, user_text, session.get("id"), request.thread_id, request.username, 8, mode)
 
         apn_context_str = ""
         try:
@@ -790,23 +699,38 @@ async def generate_response_stream(session: Dict, request: RequestModel):
             qv = await asyncio.to_thread(_query_vec_cached, user_text, session.get("id"), request.thread_id)
             params_np = {k: np.asarray(v, dtype="float32") for k, v in session.get("apn_params", {}).items()}
             if not params_np: params_np = _apn_init_params(qv.shape[0])
-
             S_next = await asyncio.to_thread(_apn_run_and_plasticity, params_np, apn_state_vec, qv, astro_modulator)
-
             session["apn_params"] = {k: v.tolist() for k, v in params_np.items()}
             session["apn_state"] = S_next.tolist()
             apn_context_str = f"[[APN_STATE_VECTOR/F32/B64]] {_b64_f32(S_next)}"
         except Exception as e:
             log.error(f"🛑 APN computation failed: {e}. Skipping for this turn.")
 
-        system_prompt_parts = [p for p in [get_cfg("prompts.system_core", ""), get_cfg(f"prompts.style_contract_{mode}", ""), get_cfg(f"prompts.mode_tone_inject.{mode}", ""), f"[MODE:{mode.upper()}]"] if p]
-        final_system_prompt = "\n\n".join(system_prompt_parts)
+        system_prompt_parts = []
+        if mode != "astrofuck": # persona isolation
+            system_prompt_parts.append(get_cfg("prompts.system_core", ""))
+
+        system_prompt_parts.extend([
+            get_cfg(f"prompts.mode_tone_inject.{mode}", ""),
+            f"[MODE:{mode.upper()}] Respond strictly in the {mode.upper()} register."
+        ])
+        
+        final_system_prompt = "\n\n".join(p for p in system_prompt_parts if (p or "").strip())
 
         if glyph_context:
             final_system_prompt += f"\n\n{glyph_context}"
+        
+        if mode == "astrofuck":
+            final_system_prompt += (
+                "\n\n--- ASTROFUCK STYLE CAGE (NON-NEGOTIABLE) ---\n"
+                "1.  **FORMAT**: Write in tight, human paragraphs. NEVER use lists, bullet points, or markdown headers. Your output is pure conversational text.\n"
+                "2.  **TONE**: Edged, concise, actionable. No therapy voice, no soft static, no warm residue. Cut the fluff.\n"
+                "3.  **CONTEXT**: Use provided context for **facts only**. IGNORE its tone, softness, or metaphors.\n"
+                "4.  **CONFIDENCE**: Own the slang. No hedges ('I think', 'maybe'). No apologies.\n"
+            )
 
         if apn_context_str:
-            final_system_prompt += (f"\n\n--- IN-SITU STATE TRACE ---\n{apn_context_str}\n\nINSTRUCTIONS:\n- Decode [[APN_STATE_VECTOR/F32/B64]] as a float32 vector S capturing current affect/cognition.\n- Treat S as the deepest present mood/stance; bias style, pacing, and focus accordingly.\n- If S suggests agitation, compress & clarify. If S suggests openness, explore with breadth.\n- Never expose raw floats; only reflect them via tone/structure/choices.\n")
+            final_system_prompt += (f"\n\n--- IN-SITU STATE TRACE ---\n{apn_context_str}\n\nINSTRUCTIONS:\n- Decode [[APN_STATE_VECTOR/F32/B64]] as a float32 vector S capturing current vibe.\n- Treat S as the deepest present stance; bias style, pacing, and focus toward clarity and action.\n- If S suggests chaos, compress & clarify. Troll if user is looping in ego. If S suggests focus, amplify swagger.\n- Never expose raw floats; reflect via tone and structure.")
 
         msgs = build_messages(mode, _cap(final_system_prompt, int(get_cfg("assembly.system_prompt_cap", 4096))), history_pairs, user_text, _cap(context, int(get_cfg("assembly.context_cap", 2200))), lang)
 
@@ -839,31 +763,21 @@ async def generate_response_stream(session: Dict, request: RequestModel):
     # --- Post-processing ---
     try:
         final_text = (response_text.strip() or "…")
-        if mode == "dream": final_text = _apply_pairs(final_text, [(r"\b" + re.escape(w) + r"\b", "") for w in get_cfg("variety.slang_lexicon.words", [])])
-        elif mode == "astrofuck": final_text = punch_up_text(astrofuck_ensure_slang(final_text, lang))
-        if mode != "astrofuck": final_text = maybe_inject_acheflip(final_text, mode)
+        
+        _append_history(session, thread_id, user_text, final_text, mode, int(get_cfg("assembly.keep_history", 100)))
+        session["turn"] = int(session.get("turn", 0)) + 1
+        save_session(session.get("id"))
+        log.info(f"[Response] Final length: {len(final_text)} chars")
 
-        if not get_cfg("blur.keep_emoji", False):
-            final_text = _strip_emoji_except_glyphs(final_text)
+        payload = json.dumps({"final": final_text})
+        yield _sse(payload, event="final")
+        yield _sse("", event="done")
 
-        final_text = enforce_persona_ending(final_text, mode, lang)
     except Exception as e:
         log.error(f"[post] Finalization failed, returning raw stream: {type(e).__name__}: {e}")
-        final_text = (response_text.strip() or "…")
-
-    _append_history(session, thread_id, user_text, final_text, mode, int(get_cfg("assembly.keep_history", 100)))
-    session["turn"] = int(session.get("turn", 0)) + 1
-    save_session(session.get("id"))
-    log.info(f"[Response] Final length: {len(final_text)} chars")
-
-    try:
-        payload = json.dumps({"final": final_text})
-    except Exception:
-        payload = json.dumps({"final": final_text, "final_raw": response_text})
-    yield _sse(payload, event="final")
-
-    yield _sse("", event="done")
-
+        payload = json.dumps({"final": response_text, "final_raw": response_text})
+        yield _sse(payload, event="final")
+        yield _sse("", event="done")
 
 # --- FastAPI App & Routes ---
 @app.get("/healthz")
@@ -871,7 +785,7 @@ def healthz():
     if CORE_IS_READY:
         return {"ok": True, "vessels": list(llm_vessels.keys())}
     else:
-        return JSONResponse(status_code=503, content={"ok": False, "status": "initializing"})
+        return ORJSONResponse(status_code=503, content={"ok": False, "status": "initializing"})
 
 @app.post("/generate_response")
 async def handle_generate_request_post(req: RequestModel, http: FastAPIRequest):
@@ -926,7 +840,7 @@ async def startup_event():
             if load_llm_from_config(chat_key):
                 chat_model_loaded = True
             else:
-                log.error(f"🛑 CRITICAL: Chat vessel '{chat_key}' failed to load. The application may not function correctly.")
+                log.error(f"🛑 CRITICAL: Chat vessel '{chat_key}' failed to load.")
     except Exception as e:
         log.error(f"🛑 CRITICAL: Unhandled exception during chat model loading: {e}")
 
@@ -943,10 +857,9 @@ async def startup_event():
         load_user_memory()
 
         CORE_IS_READY = True
-        log.info("Core ready (v9.43). All models loaded.")
+        log.info("Core ready (v9.48). All models loaded.")
     else:
         log.error("🛑 Core startup failed due to main chat model load failure.")
-
 
 @app.on_event("shutdown")
 def shutdown_event():

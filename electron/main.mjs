@@ -1,13 +1,14 @@
-// electron/main.mjs — REFORGED v12.5 (Standalone DMG core + read-only safe)
+// electron/main.mjs — REFORGED v12.6 (Freeze-proof + Timer hygiene)
 // - DEV FLOW: Always load Vite when !app.isPackaged.
 // - STANDALONE: Runs backend code from bundle but writes to userData — works straight off DMG (read-only).
 // - READ-ONLY SAFE: Detects read-only Resources and skips seeding/copying payloads/models.
 // - GPU: HW accel ON; caches nuked on boot & quit to avoid leaks.
 // - PID GUARD: JSON pid; skip duplicate spawns.
-// - HEALTH: single probe with exponential backoff + timeout degrade.
+// - HEALTH: single probe with exponential backoff + timeout degrade (and stops probing on degrade).
 // - LOGS: async append; renderer overlay optional.
 // - IPC ORDER: prefs/threads handlers registered before renderer loads.
 // - STATE: creates ~/Library/.../Blur/sessions so backend can write sessions.
+// - FREEZE FIXES: clears all intervals on exit; detaches pipes before kill; hard-exit failsafe.
 
 import { app, BrowserWindow, shell, ipcMain, powerMonitor, session } from "electron";
 import { spawn } from "child_process";
@@ -50,6 +51,8 @@ let isQuitting = false;
 let finalThreadsPayload = null;
 let restartingWithoutFastLoop = false;
 let probeTimer = null;
+let stderrBudgetTimer = null;      // ← NEW
+let forceQuitTimer = null;         // ← NEW
 
 const CORE_PORT = String(process.env.BLUR_CORE_PORT || "8000");
 const CORE_HOST = process.env.BLUR_CORE_HOST || "127.0.0.1";
@@ -498,15 +501,18 @@ function startAIServer(useFastLoop = false) {
 
   writePidFile(aiProc.pid || 0); // safe writer ignores <=1
 
-  // log throttling for stderr
+  // log throttling for stderr (track & clear)
   aiProc.stderr.setEncoding("utf8");
   let errBudget = 40; // lines per 10s
-  setInterval(()=>{ errBudget = 40; }, 10_000);
+  if (stderrBudgetTimer) { clearInterval(stderrBudgetTimer); }
+  stderrBudgetTimer = setInterval(() => { errBudget = 40; }, 10_000);
+
   aiProc.stderr.on("data", (d) => {
     const line = String(d).trim();
     if (errBudget-- > 0) log(`[AI Core STDERR]: ${line}`);
     if(/bad interpreter/i.test(line)){
-      log("[main] Python venv broken."); stopAIServer(); aiReady=false; model_status={status:"error",message:"Fatal: Python environment is broken."}; broadcastStatus();
+      log("[main] Python venv broken.");
+      stopAIServer(); aiReady=false; model_status={status:"error",message:"Fatal: Python environment is broken."}; broadcastStatus();
     }
     if(/(No module named 'uvloop'|No module named 'httptools')/i.test(line) && useFastLoop && !restartingWithoutFastLoop){
       restartingWithoutFastLoop = true;
@@ -515,19 +521,23 @@ function startAIServer(useFastLoop = false) {
       startAIServer(false);
     }
   });
+
   if (app.isPackaged || process.env.BLUR_CORE_STDOUT_LOG === "1") {
     aiProc.stdout.setEncoding("utf8");
     aiProc.stdout.on("data", (d) => log(`[AI Core]: ${String(d).trim()}`));
   }
+
   aiProc.on("error", (err) => {
     log("--- [CRITICAL AI CORE SPAWN ERROR] ---", String(err?.stack||err?.message||err));
     aiReady=false; model_status={status:"error",message:"Fatal: Failed to start AI Core. Check main.log."}; broadcastStatus();
   });
+
   aiProc.on("exit", (code, signal) => {
     log(`--- [AI Core EXIT] code=${code} signal=${signal} ---`);
     removePidFile();
     aiProc = null; aiReady = false;
     restartingWithoutFastLoop = false;
+    if (stderrBudgetTimer) { clearInterval(stderrBudgetTimer); stderrBudgetTimer = null; } // ← NEW
     if (model_status.status !== "stopping") {
       model_status = { status: "error", message: `AI Core exited abnormally (code ${code}).` };
       broadcastStatus();
@@ -537,11 +547,18 @@ function startAIServer(useFastLoop = false) {
 function stopAIServer() {
   if (!aiProc) { log("[main] AI Core stop ignored: not running."); removePidFile(); return; }
   log("[main] Stopping AI Core…");
+
+  // Detach listeners before kill (prevents event loop hangs)
+  try { aiProc.stdout?.removeAllListeners?.(); } catch {}
+  try { aiProc.stderr?.removeAllListeners?.(); } catch {}
+
   try {
     if (process.platform === "win32") spawn("taskkill", ["/PID", String(aiProc.pid), "/T", "/F"]);
     else {
       try { process.kill(-aiProc.pid, "SIGTERM"); } catch { try { process.kill(aiProc.pid, "SIGTERM"); } catch {} }
-      setTimeout(() => { try { process.kill(-aiProc.pid, "SIGKILL"); } catch { try { process.kill(aiProc.pid, "SIGKILL"); } catch {} } }, 1200);
+      setTimeout(() => {
+        try { process.kill(-aiProc.pid, "SIGKILL"); } catch { try { process.kill(aiProc.pid, "SIGKILL"); } catch {} }
+      }, 1200);
     }
   } catch {
     try { aiProc.kill("SIGTERM"); } catch {}
@@ -632,7 +649,14 @@ async function createWindow() {
   mainWindow.webContents.on("console-message", (_e, level, message) => log(`[renderer:L${level}] ${message}`));
   mainWindow.webContents.on("did-finish-load", () => { ensureOverlay(mainWindow); bootMark("renderer finished load"); });
   mainWindow.webContents.once("dom-ready", async () => {
-    try { await session.defaultSession.clearCache(); } catch {}
+    try {
+      // Clear cache once per run to avoid perf stalls on rapid relaunches
+      const k = "cacheClearedThisRun";
+      if (!prefs?.get?.(k)) {
+        await session.defaultSession.clearCache();
+        prefs?.set?.(k, true);
+      }
+    } catch {}
     closeSplash();
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
       mainWindow.showInactive();
@@ -677,7 +701,12 @@ powerMonitor.on("lock-screen", () => { flushRendererNow(); });
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) { app.quit(); }
 else {
-  app.on("second-instance", () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); } });
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
 
   app.whenReady().then(async () => {
     initLogger(); bootMark("logger ready");
@@ -729,6 +758,7 @@ else {
             if (model_status.status === "starting") {
               model_status = { status: "degraded", message: "AI Core startup timeout." };
               broadcastStatus();
+              if (probeTimer) { clearInterval(probeTimer); probeTimer = null; } // ← stop probing on degrade
             }
           }, 60000);
         }
@@ -754,21 +784,40 @@ app.on("child-process-gone", (_e, details) => {
 ============================================================================ */
 function cleanQuit() {
   if (isQuitting) return; isQuitting = true;
+
+  // Global timer cleanup to avoid sticky event loops
+  if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
+  if (stderrBudgetTimer) { clearInterval(stderrBudgetTimer); stderrBudgetTimer = null; }
+
+  // Safety: force exit if something refuses to die
+  if (!forceQuitTimer) {
+    forceQuitTimer = setTimeout(() => {
+      log("[quit] force exit");
+      process.exit(0);
+    }, 4000);
+  }
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     log("[quit] Requesting final state from renderer…");
     mainWindow.webContents.send("main-process-quitting");
     setTimeout(async () => {
-      if (isNonEmptyThreads(finalThreadsPayload)) { log("[quit] Saving final threads state…"); writeThreadsFileAtomic(finalThreadsPayload); }
+      if (isNonEmptyThreads(finalThreadsPayload)) {
+        log("[quit] Saving final threads state…");
+        writeThreadsFileAtomic(finalThreadsPayload);
+      }
       stopAIServer();
       try { await session.defaultSession.clearCache(); } catch {}
       nukeGpuCaches("quit");
       app.quit();
+      if (forceQuitTimer) { clearTimeout(forceQuitTimer); forceQuitTimer = null; }
     }, 400);
     return;
   }
+
   stopAIServer();
   nukeGpuCaches("quit");
   app.quit();
+  if (forceQuitTimer) { clearTimeout(forceQuitTimer); forceQuitTimer = null; }
 }
 app.on("before-quit", (e) => { if (!isQuitting) { e.preventDefault(); cleanQuit(); } });
 app.on("window-all-closed", () => { if (!isMac) cleanQuit(); });

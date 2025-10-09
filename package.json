@@ -11,13 +11,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml electron .",
-
     "dist": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder",
-
     "pack:dmg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --arm64",
-
     "dist:mac:pkg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
-
     "dist:win": "vite build && electron-builder --win nsis",
     "dist:linux": "vite build && electron-builder --linux AppImage deb",
     "rebuild:native": "electron-rebuild -f -w sqlite3",
@@ -37,6 +33,9 @@
   "license": "ISC",
   "build": {
     "appId": "com.blur.app",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": { "buildResources": "build" },
+
     "asar": true,
     "asarUnpack": [
       "**/*.node",
@@ -46,6 +45,7 @@
       "models/**"
     ],
     "afterPack": "build/afterPack.cjs",
+
     "files": [
       "dist/**",
       "!dist/*.dmg",
@@ -65,14 +65,16 @@
       { "from": "models", "to": "models" },
       { "from": "blur_env-darwin-arm64", "to": "blur_env-darwin-arm64" }
     ],
+
     "mac": {
       "target": ["dmg"],
       "category": "public.app-category.productivity",
-      "hardenedRuntime": true,
-      "entitlements": "entitlements.mac.plist",
-      "entitlementsInherit": "entitlements.mac.plist"
+      "identity": null,
+      "hardenedRuntime": false
     },
+
     "dmg": {
+      "sign": false,
       "background": "build/dmgbg.png",
       "window": { "width": 650, "height": 500 },
       "contents": [

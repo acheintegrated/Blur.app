@@ -1,5 +1,5 @@
 // /opt/blurface/src/components/TerminalLayout.tsx
-// REFORGED v4.1 — Stop-Wired + CursorGlow + Coalesced Mode Switch
+// REFORGED v4.3 — Full-width Neon Beam (moon ⇄ earth), no tooltip, no fork
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './SideBar';
@@ -187,9 +187,7 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     setIsSwitchingMode(true);
 
     try { window.dispatchEvent(new CustomEvent('blur:mode-switch-start', { detail: { intentId, from: currentMode } })); } catch {}
-
     try { if (isLoading) markLastAssistantCut(); onStopGeneration(); } catch {}
-
     try { onModeToggle(); } catch {}
   }, [currentMode, isSwitchingMode, onModeToggle, onStopGeneration, isLoading, markLastAssistantCut]);
 
@@ -297,19 +295,50 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
     closeMenu();
   };
 
-  /* Small UI bits */
-  const ModeShimmer = () => (
-    <div className="absolute inset-x-0 top-[57px] h-[2px] overflow-hidden">
-      <div className={`${isSwitchingMode ? 'animate-[shimmer_1.2s_linear_infinite]' : 'opacity-0'} h-full w-full bg-gradient-to-r from-transparent via-white/70 to-transparent`} />
-      <style>{`@keyframes shimmer { 0%{ transform: translateX(-100%);} 100%{ transform: translateX(100%);} }`}</style>
+  /* ===== Neon beam (full header width, center-out, no fork) ===== */
+  const ModeHeaderBeam: React.FC<{ active: boolean }> = ({ active }) => (
+    <div className="pointer-events-none absolute inset-x-0 bottom-[-1px] h-[2px] z-10">
+      <style>{`
+        @keyframes beamUnfold {
+          0%   { clip-path: inset(0 50% 0 50%); opacity: 0; }
+          8%   { opacity: 1; }
+          100% { clip-path: inset(0 0 0 0); opacity: 1; }
+        }
+        @keyframes beamFade {
+          0%   { opacity: 1; }
+          70%  { opacity: 1; }
+          100% { opacity: 0; }
+        }
+
+        .beam-line {
+          position: absolute;
+          inset: 0;
+          border-radius: 1px;
+          background: #ffffff; /* white-hot core */
+          box-shadow:
+            0 0 6px  rgba(255,255,200,.95),
+            0 0 14px rgba(255,235,59,.95),
+            0 0 28px rgba(255,235,59,.75),
+            0 0 52px rgba(255,235,59,.5);
+          filter: saturate(220%) brightness(120%);
+          will-change: clip-path, opacity;
+        }
+
+        .beam-anim {
+          animation:
+            beamUnfold 120ms cubic-bezier(.3,.8,.2,1) forwards,
+            beamFade   240ms ease-out forwards;
+        }
+
+        /* Fallback if clip-path unsupported (rare in Electron) */
+        @supports not (clip-path: inset(0 50% 0 50%)) {
+          .beam-line { transform-origin: center; transform: scaleX(0.001); }
+          @keyframes beamScale { to { transform: scaleX(1); opacity: 1; } }
+          .beam-anim { animation: beamScale 120ms cubic-bezier(.3,.8,.2,1) forwards, beamFade 240ms ease-out forwards; }
+        }
+      `}</style>
+      {active && <div className="beam-line beam-anim" />}
     </div>
-  );
-  const ModeBadge = () => (
-    isSwitchingMode ? (
-      <span className="ml-3 inline-flex items-center px-2 py-1 rounded-full border border-white/10 bg-white/5 backdrop-blur-sm select-none">
-        <span className="inline-block h-3 w-3 rounded-full border-2 border-white/40 border-t-transparent animate-spin" />
-      </span>
-    ) : null
   );
 
   const handleNewConversationLocal = useCallback(() => {
@@ -333,8 +362,6 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
           text-shadow: 0 0 5px rgba(242,0,242,.9), 0 0 10px rgba(242,0,242,.8), 0 0 20px rgba(242,0,242,.7);
         }
       `}</style>
-
-      <ModeShimmer />
 
       <div className="flex flex-1 overflow-hidden">
         <div
@@ -370,7 +397,8 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
         </div>
 
         <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="h-[57px] border-b border-zinc-900 flex items-center justify-between px-4 flex-shrink-0">
+          {/* Header is relative so beam can fill full width */}
+          <div className="relative h-[57px] border-b border-zinc-900 flex items-center justify-between px-4 flex-shrink-0">
             <div className="flex items-center space-x-2">
               <div className="flex items-center justify-center cursor-pointer" onClick={toggleSidebar}>
                 <span className="text-3xl text-gray-400 hover:text-white transition-colors duration-150 icon-font mt-[7px]">☾</span>
@@ -383,24 +411,23 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
             </div>
 
             <div className="flex items-center">
+              {/* ø — no title (no tooltip) */}
               <div
                 className={`flex items-center justify-center cursor-pointer mode-button ${isSwitchingMode ? 'opacity-50 pointer-events-none' : 'blur-glow-hover'} ${currentMode === 'astrofuck' ? 'mode-astrofuck-active' : ''}`}
                 onClick={requestModeSwitch}
-                title={isSwitchingMode ? 'Switching…' : 'Switch mode'}
               >
                 <span className="text-3xl icon-font">∅</span>
               </div>
               <div className="mode-separator">
                 <span className="text-2xl icon-font">|</span>
               </div>
+              {/* ∞ — no title (no tooltip) */}
               <div
                 className={`flex items-center justify-center cursor-pointer mode-button ${isSwitchingMode ? 'opacity-50 pointer-events-none' : (currentMode === 'dream' ? 'mode-dream-active' : 'blur-glow-hover')}`}
                 onClick={requestModeSwitch}
-                title={isSwitchingMode ? 'Switching…' : 'Switch mode'}
               >
                 <span className="text-3xl icon-font">∞</span>
               </div>
-              <ModeBadge />
             </div>
 
             <div className="flex items-center">
@@ -408,6 +435,9 @@ export const TerminalLayout: React.FC<TerminalLayoutProps> = (props) => {
                 <span className="text-3xl hover:text-white text-gray-400 transition-colors duration-150 icon-font -mt-[3px]">🜃</span>
               </div>
             </div>
+
+            {/* full-width lightning beam under the zinc border */}
+            <ModeHeaderBeam active={isSwitchingMode} />
           </div>
 
           <div className="flex-1 min-h-0 overflow-hidden">
