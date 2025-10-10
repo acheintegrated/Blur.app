@@ -2,8 +2,9 @@ fastapi>=0.110,<1.0
 uvicorn[standard]>=0.30,<0.40
 pydantic>=2.6,<3
 orjson>=3.9,<4
+PyYAML>=6.0,<7           # ← needed
 langdetect>=1.0.9,<2
 numpy>=1.26,<3
-faiss-cpu==1.12.0
+faiss-cpu>=1.7.4,<2      # ← or your known-good exact version
 llama-cpp-python>=0.2.87
 PyMuPDF>=1.23,<2
