@@ -12,8 +12,10 @@
     "preview": "vite preview",
     "start": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml electron .",
     "dist": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder",
-    "pack:dmg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --arm64",
-    "dist:mac:pkg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
+    "pack:dmg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-x64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --x64",
+    "pack:dmg:arm64": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-arm64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --arm64",
+    "pack:dmg:universal": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_MODE=dual BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --universal",
+    "dist:mac:pkg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-arm64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
     "dist:win": "vite build && electron-builder --win nsis",
     "dist:linux": "vite build && electron-builder --linux AppImage deb",
     "rebuild:native": "electron-rebuild -f -w sqlite3",
@@ -34,18 +36,18 @@
   "build": {
     "appId": "com.blur.app",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
-    "directories": { "buildResources": "build" },
-
+    "directories": {
+      "buildResources": "build"
+    },
     "asar": true,
     "asarUnpack": [
       "**/*.node",
       "**/*.dylib",
-      "blur_env-darwin-arm64/**",
+      "blur_env-darwin-*/**",
       "core/**",
       "models/**"
     ],
     "afterPack": "build/afterPack.cjs",
-
     "files": [
       "dist/**",
       "!dist/*.dmg",
@@ -62,17 +64,14 @@
       { "from": "core/ouinet/blurchive/ecosystem", "to": "core/ouinet/blurchive/ecosystem" },
       { "from": "config.yaml", "to": "config.yaml" },
       { "from": "acheflip.yaml", "to": "acheflip.yaml" },
-      { "from": "models", "to": "models" },
-      { "from": "blur_env-darwin-arm64", "to": "blur_env-darwin-arm64" }
+      { "from": "models", "to": "models" }
     ],
-
     "mac": {
       "target": ["dmg"],
       "category": "public.app-category.productivity",
       "identity": null,
       "hardenedRuntime": false
     },
-
     "dmg": {
       "sign": false,
       "background": "build/dmgbg.png",

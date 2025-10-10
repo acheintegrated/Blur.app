@@ -1,31 +1,38 @@
-// build/afterPack.cjs — v8 (hardened DMG payload copy + strict sanity checks)
+// build/afterPack.cjs — v10 (robust copy + dual-venv + universal-friendly)
+// - FIX: EPERM on numpy dirs by replacing hand-rolled recursion with fs.cpSync (symlink-aware)
+// - FIX: use lstatSync; preserve symlinks; pre-clean destination (rm -rf) before copy
+// - ADD: dual venv mode (BLUR_VENV_MODE=dual) or single (BLUR_VENV_NAME=...)
+// - ADD: strict mode (STRICT_AFTERPACK=1) to fail on missing assets
+// - ADD: quarantine scrub for .app (xattr -dr com.apple.quarantine)
+// - ADD: chmod +x for bin/* in venvs + core/bin
+// - SAFE: filters out __pycache__ and *.pyc when copying
+//
+// ENV knobs:
+//   BLUR_VENV_MODE=dual                      → expects blur_env-darwin-x64 and blur_env-darwin-arm64
+//   BLUR_VENV_NAME=blur_env-darwin-arm64     → single venv name (overrides dual)
+//   STRICT_AFTERPACK=1                        → throw on any missing asset
+//   BLUR_BUNDLE_ROOT=/abs/path                → source root override (expects /core under it)
+//   BLUR_BUNDLE_BLURCHIVE=/abs/path          → blurchive source override
+//   BLUR_REFRESH_BLURCHIVE=1                 → force re-sync blurchive even if exists
+
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, spawnSync } = require("child_process");
 
-/* ---------------- helpers ---------------- */
-const exists   = p => { try { return fs.existsSync(p); } catch { return false; } };
-const statSafe = p => { try { return fs.statSync(p); } catch { return null; } };
-const isDir    = p => !!(statSafe(p)?.isDirectory());
-const ensure   = p => fs.mkdirSync(p, { recursive: true });
+const exists = (p) => { try { return fs.existsSync(p); } catch { return false; } };
+const isDir  = (p) => { try { return fs.lstatSync(p).isDirectory(); } catch { return false; } };
+const statSafe = (p) => { try { return fs.lstatSync(p); } catch { return null; } };
+const ensureDir = (p) => { try { fs.mkdirSync(p, { recursive: true }); } catch {} };
 
-function list(dir) { try { return fs.readdirSync(dir); } catch { return []; } }
+function rmrf(p) {
+  if (!exists(p)) return;
+  try { fs.rmSync(p, { recursive: true, force: true, maxRetries: 2 }); } catch {}
+}
 
-function copyDir(src, dst) {
-  const st = statSafe(src);
-  if (!st) return false;
-  if (st.isDirectory()) {
-    ensure(dst);
-    for (const name of fs.readdirSync(src)) {
-      const s = path.join(src, name);
-      const d = path.join(dst, name);
-      copyDir(s, d);
-    }
-  } else {
-    ensure(path.dirname(dst));
-    fs.copyFileSync(src, dst);
-  }
-  return true;
+function clearQuarantine(p) {
+  try {
+    execSync(`xattr -dr com.apple.quarantine "${p}"`, { stdio: "ignore" });
+  } catch {}
 }
 
 function chmodExecRecursive(dir) {
@@ -36,142 +43,159 @@ function chmodExecRecursive(dir) {
     for (const name of fs.readdirSync(cur)) {
       const p = path.join(cur, name);
       const st = statSafe(p); if (!st) continue;
-      if (st.isDirectory()) stack.push(p);
-      else { try { fs.chmodSync(p, 0o755); } catch {} }
+      if (st.isDirectory()) {
+        stack.push(p);
+      } else {
+        // only mark likely executables
+        if (/\/bin\/[^/]+$/.test(p) || /(\.sh|\.bin|^activate)$/.test(name)) {
+          try { fs.chmodSync(p, 0o755); } catch {}
+        }
+      }
     }
   }
 }
 
-function clearQuarantine(p) {
-  try { execSync(`xattr -dr com.apple.quarantine "${p}"`, { stdio: "ignore" }); } catch {}
-}
+// Prefer fs.cpSync (Node ≥16.7). Fallback to `cp -a`.
+function copyTree(src, dst) {
+  if (!exists(src)) return false;
+  rmrf(dst);
+  ensureDir(path.dirname(dst));
 
-function must(human, cond, detail) {
-  if (!cond) {
-    const msg = `[afterPack] ❌ ${human}${detail ? ` — ${detail}` : ""}`;
-    throw new Error(msg);
+  if (fs.cpSync) {
+    // keep symlinks; don’t dereference; filter pycache junk
+    fs.cpSync(src, dst, {
+      recursive: true,
+      force: true,
+      dereference: false,
+      errorOnExist: false,
+      filter: (p) => {
+        const base = path.basename(p);
+        if (base === "__pycache__") return false;
+        if (base.endsWith(".pyc") || base.endsWith(".pyo")) return false;
+        return true;
+      },
+    });
+    return true;
   }
+
+  // fallback for older Node: cp -a preserves links, perms, times
+  const res = spawnSync("cp", ["-a", src + "/.", dst], { stdio: "inherit" });
+  if (res.status !== 0) throw new Error(`cp -a failed: ${src} -> ${dst}`);
+  return true;
 }
 
-/* ---------------- main hook ---------------- */
+function resolveAppResources(context) {
+  const appName = context?.packager?.appInfo?.productFilename || "Blur";
+  const appOutDir = context?.appOutDir || process.cwd();
+  const appPath = path.join(appOutDir, `${appName}.app`);
+  const resDir = exists(appPath)
+    ? path.join(appPath, "Contents", "Resources")
+    : path.join(appOutDir, "resources");
+  ensureDir(resDir);
+  try { fs.writeFileSync(path.join(resDir, "BLUR_PACKAGED"), "1"); } catch {}
+  return { appName, appOutDir, appPath, resDir };
+}
+
 module.exports = async (context) => {
-  const strict = (process.env.STRICT_AFTERPACK === "1"); // we default to true in scripts
-  const appName    = context?.packager?.appInfo?.productFilename || "Blur";
+  const strict = process.env.STRICT_AFTERPACK === "1";
+  const refreshBlurchive = process.env.BLUR_REFRESH_BLURCHIVE === "1";
+  const dualVenv = process.env.BLUR_VENV_MODE === "dual";
+  const singleVenv = process.env.BLUR_VENV_NAME || null;
+
+  if (!dualVenv && !singleVenv && strict) {
+    throw new Error("[afterPack] must set BLUR_VENV_NAME (single) or BLUR_VENV_MODE=dual when STRICT_AFTERPACK=1");
+  }
+
+  const { appName, appOutDir, appPath, resDir } = resolveAppResources(context);
   const projectDir = context?.packager?.projectDir || process.cwd();
 
-  // Where the .app lives for this target
-  const appPath = path.join(context.appOutDir, `${appName}.app`);
-  const resDir  = exists(appPath)
-    ? path.join(appPath, "Contents", "Resources")
-    : path.join(context.appOutDir, "resources");
-  ensure(resDir);
+  const resCore      = path.join(resDir, "core");
+  const resCoreBin   = path.join(resCore, "bin");
+  const resBlurchive = path.join(resCore, "ouinet", "blurchive", "ecosystem");
+  const dstChunks    = path.join(resBlurchive, "knowledge_chunks.jsonl");
 
-  // Sentinels for later runtime checks
-  try { fs.writeFileSync(path.join(resDir, "BLUR_PACKAGED"), "1"); } catch {}
-
-  // Layout inside Resources
-  const resCore        = path.join(resDir, "core");
-  const resCoreBin     = path.join(resCore, "bin");
-  const resVenv        = path.join(resDir, "blur_env-darwin-arm64");
-  const resVenvBin     = path.join(resVenv, "bin");
-  const resPython      = path.join(resVenvBin, "python3");
-  const resConfig      = path.join(resDir, "config.yaml");
-  const resAcheflip    = path.join(resDir, "acheflip.yaml");
-  const resModels      = path.join(resDir, "models");
-  const resBlurchive   = path.join(resCore, "ouinet", "blurchive", "ecosystem");
-  const resChunks      = path.join(resBlurchive, "knowledge_chunks.jsonl");
-
-  // Source roots (env preferred, then repo)
-  const envRoot      = process.env.BLUR_BUNDLE_ROOT;                       // e.g. "$PWD" or "$HOME/blur"
-  const srcVenv      = process.env.BLUR_BUNDLE_VENV === "1"
-    ? path.join(envRoot || projectDir, "blur_env-darwin-arm64")
-    : path.join(projectDir, "blur_env-darwin-arm64"); // still try local folder
-  const srcCoreA     = path.join(projectDir, "core");
-  const srcCoreB     = path.join(projectDir, "electron", "backend");
-  const srcCore      = exists(srcCoreA) ? srcCoreA : (exists(srcCoreB) ? srcCoreB : null);
-
-  const srcModels    = process.env.BLUR_BUNDLE_MODELS || path.join(projectDir, "models");
-  const srcConfig    = path.join(projectDir, "config.yaml");
-  const srcAcheflip  = path.join(projectDir, "acheflip.yaml");
-
+  const envRoot      = process.env.BLUR_BUNDLE_ROOT;
+  const envCore      = envRoot ? path.join(envRoot, "core") : null;
   const envBlurchive = process.env.BLUR_BUNDLE_BLURCHIVE || null;
-  const srcBlurchiveA= path.join(srcCoreA, "ouinet", "blurchive", "ecosystem");
-  const srcBlurchiveB= path.join(srcCoreB, "ouinet", "blurchive", "ecosystem");
-  const srcBlurchive = (envBlurchive && exists(envBlurchive)) ? envBlurchive
-                        : exists(srcBlurchiveA) ? srcBlurchiveA
-                        : exists(srcBlurchiveB) ? srcBlurchiveB
-                        : null;
 
-  console.log("[afterPack] appOutDir:", context.appOutDir);
-  console.log("[afterPack] Resources:", resDir);
-  console.log("[afterPack] sources:", {
-    srcVenv,
-    srcCore,
-    srcModels: exists(srcModels) ? srcModels : "(missing)",
-    srcConfig: exists(srcConfig) ? srcConfig : "(missing)",
-    srcAcheflip: exists(srcAcheflip) ? srcAcheflip : "(missing)",
-    srcBlurchive: srcBlurchive || "(missing)",
-  });
+  const repoCoreA      = path.join(projectDir, "core");
+  const repoCoreB      = path.join(projectDir, "electron", "backend");
+  const repoBlurchiveA = path.join(repoCoreA, "ouinet", "blurchive", "ecosystem");
+  const repoBlurchiveB = path.join(repoCoreB, "ouinet", "blurchive", "ecosystem");
 
-  /* ---- Copy: core (only if missing; extraResources usually places it) ---- */
-  const neededCoreMain = path.join(resCore, "convo_chat_core.py");
-  if (!exists(neededCoreMain) && srcCore) {
-    console.log("[afterPack] core missing → copying core/ → Resources/core");
-    copyDir(srcCore, resCore);
+  const srcCore =
+    (envCore && exists(envCore)) ? envCore :
+    (exists(repoCoreA))          ? repoCoreA :
+    (exists(repoCoreB))          ? repoCoreB : null;
+
+  const srcBlurchive =
+    (envBlurchive && exists(envBlurchive)) ? envBlurchive :
+    (exists(repoBlurchiveA))               ? repoBlurchiveA :
+    (exists(repoBlurchiveB))               ? repoBlurchiveB : null;
+
+  // 1) Ensure core in Resources/core
+  if (!exists(path.join(resCore, "convo_chat_core.py")) && srcCore) {
+    console.log(`[afterPack] core missing → copying from: ${srcCore}`);
+    copyTree(srcCore, resCore);
+  } else if (!exists(path.join(resCore, "convo_chat_core.py"))) {
+    const msg = "[afterPack] ❌ core missing and no source found";
+    if (strict) throw new Error(msg);
+    console.warn(msg);
   }
 
-  /* ---- Copy: config & acheflip (overwrite allowed; you treat bundle as truth) ---- */
-  if (exists(srcConfig))   { ensure(path.dirname(resConfig));   fs.copyFileSync(srcConfig, resConfig); }
-  if (exists(srcAcheflip)) { ensure(path.dirname(resAcheflip)); fs.copyFileSync(srcAcheflip, resAcheflip); }
-
-  /* ---- Copy: models (optional; do not fail build if absent) ---- */
-  if (exists(srcModels)) {
-    if (!exists(resModels) || list(resModels).length === 0) {
-      console.log("[afterPack] copying models/ (first seed) …");
-      copyDir(srcModels, resModels);
-    } else {
-      console.log("[afterPack] models already present, skipping heavy copy.");
-    }
-  } else {
-    console.log("[afterPack] models not found in source — continuing without models.");
-  }
-
-  /* ---- Copy: blurchive dataset (copy when directory missing OR chunks missing) ---- */
+  // 2) Ensure blurchive (optional, warn if missing chunks)
   if (srcBlurchive) {
-    const need = !exists(resBlurchive) || !exists(resChunks);
-    if (need) {
-      console.log("[afterPack] syncing blurchive dataset →", resBlurchive);
-      copyDir(srcBlurchive, resBlurchive);
+    const needSync = refreshBlurchive || !exists(resBlurchive) || !exists(dstChunks);
+    if (needSync) {
+      console.log(`[afterPack] syncing blurchive → ${resBlurchive}`);
+      copyTree(srcBlurchive, resBlurchive);
     }
   }
-
-  /* ---- Copy: venv (critical) ----
-     We *always* ensure a full venv with bin/python3 lives under Resources.
-     If extraResources already placed it but it's partial, we fix it here. */
-  const hasPython = exists(resPython);
-  if (!hasPython) {
-    console.log("[afterPack] venv python missing → copying blur_env-darwin-arm64 → Resources/");
-    must("venv source directory must exist", exists(srcVenv) && isDir(srcVenv), srcVenv);
-    copyDir(srcVenv, resVenv);
+  if (exists(resBlurchive) && !exists(dstChunks)) {
+    const msg = `[afterPack] ⚠ blurchive present but knowledge_chunks.jsonl missing: ${dstChunks}`;
+    if (strict) throw new Error(msg);
+    console.warn(msg);
   }
 
-  /* ---- Fix perms on executables ---- */
-  chmodExecRecursive(resVenvBin);
+  // 3) Venvs: dual or single
+  const venvs = dualVenv
+    ? ["blur_env-darwin-x64", "blur_env-darwin-arm64"]
+    : (singleVenv ? [singleVenv] : []);
+
+  const missing = [];
+  for (const v of venvs) {
+    const srcV = path.join(projectDir, v);
+    const dstV = path.join(resDir, v);
+    if (!exists(dstV)) {
+      if (exists(srcV)) {
+        console.log(`[afterPack] copying venv → ${v}`);
+        try {
+          copyTree(srcV, dstV);
+        } catch (e) {
+          // surface a clearer error for numpy/symlink weirdness
+          const msg = `[afterPack] failed to copy ${v}: ${e?.message || e}`;
+          if (strict) throw new Error(msg);
+          console.warn(msg);
+        }
+      } else {
+        missing.push(`[venv missing in project]: ${srcV}`);
+      }
+    }
+    const pythonExe = path.join(dstV, "bin", "python3");
+    if (!exists(pythonExe)) missing.push(`[venv python missing]: ${pythonExe}`);
+    chmodExecRecursive(path.join(dstV, "bin"));
+  }
+
+  // 4) perms for core/bin
   chmodExecRecursive(resCoreBin);
 
-  /* ---- Clear quarantine (local test) ---- */
+  // 5) quarantine clear (macOS)
   if (process.platform === "darwin" && exists(appPath)) {
     clearQuarantine(appPath);
   }
 
-  /* ---- Sanity checks (STRICT) ---- */
-  const missing = [];
-  if (!exists(resPython))           missing.push(resPython);
-  if (!exists(neededCoreMain))      missing.push(neededCoreMain);
-  if (!exists(resConfig))           missing.push(resConfig);
-
   if (missing.length) {
-    const msg = `[afterPack] missing required assets:\n - ${missing.join("\n - ")}`;
+    const msg = `[afterPack] missing assets:\n - ${missing.join("\n - ")}`;
     if (strict) throw new Error(msg);
     console.warn(msg);
   }

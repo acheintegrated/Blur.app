@@ -1,4 +1,4 @@
-// electron/main.mjs — REFORGED v12.8 (ZOMBIE-PROOF)
+// electron/main.mjs — REFORGED v13.0 (ARCH-AWARE & ZOMBIE-PROOF)
 // - AGGRESSIVE CLEANUP: Kills any orphaned core processes on boot and quit.
 // - AGGRESSIVE STOP: Uses SIGKILL immediately to stop the AI server, preventing hangs.
 // - DEV FLOW: Always load Vite when !app.isPackaged.
@@ -11,6 +11,7 @@
 // - IPC ORDER: prefs/threads handlers registered before renderer loads.
 // - STATE: creates ~/Library/.../Blur/sessions so backend can write sessions.
 // - FREEZE FIXES: clears all intervals on exit; detaches pipes before kill; hard-exit failsafe; cache ops once per boot.
+// - ARCH AWARE: picks blur_env-darwin-{arm64|x64} at runtime; universal-ready.
 
 import { app, BrowserWindow, shell, ipcMain, powerMonitor, session } from "electron";
 import { spawn, exec } from "child_process";
@@ -50,7 +51,6 @@ function killOrphanedCores() {
     });
   } catch {}
 }
-// Call it immediately
 killOrphanedCores();
 
 /* ============================================================================
@@ -59,16 +59,14 @@ killOrphanedCores();
 const isMac = process.platform === "darwin";
 const SHOW_OVERLAY = !!process.env.BLUR_DEBUG_OVERLAY;
 
-// GPU stays enabled. Optional features guarded to reduce leaks.
 app.commandLine.appendSwitch("allow-running-insecure-content");
 app.commandLine.appendSwitch("disable-features", "OutOfBlinkCors");
 if (process.env.BLUR_GPU_OOP === "1") {
-  // Enable cautiously; can cause VRAM growth on some drivers.
   app.commandLine.appendSwitch("enable-features", "CanvasOopRasterization,PartialSwap");
 }
 
 /* ============================================================================
-   GLOBALS
+   GLOBALS (runtime)
 ============================================================================ */
 let aiProc = null;
 let mainWindow = null;
@@ -123,12 +121,59 @@ function readYamlVersion(text = "") {
   return (m && m[1] && m[1].trim()) || "";
 }
 function getBundledRoot() { return process.resourcesPath || join(__dirname, ".."); }
-function embeddedVenvDir() {
-  return app.isPackaged
-    ? join(process.resourcesPath || "", "blur_env-darwin-arm64")
-    : join(app.getAppPath(), "resources", "blur_env-darwin-arm64");
+
+/* -------- ARCH-AWARE VENV SELECTION (universal-ready) -------- */
+function archVenvName() {
+  const a = process.arch; // "arm64" | "x64" | ...
+  if (a === "arm64") return "blur_env-darwin-arm64";
+  if (a === "x64")   return "blur_env-darwin-x64";
+  return "blur_env-darwin-arm64";
 }
-function embeddedPythonBin() { return join(embeddedVenvDir(), "bin", "python3"); }
+function venvCandidatesInResources() {
+  const base = getBundledRoot();
+  const picks = [
+    join(base, archVenvName()),                 // matching arch first
+    join(base, "blur_env-darwin-arm64"),       // fallback #1
+    join(base, "blur_env-darwin-x64"),         // fallback #2
+  ];
+  return picks.filter((v, i, arr) => arr.indexOf(v) === i);
+}
+function venvCandidatesInDev() {
+  const base = join(app.getAppPath(), "resources");
+  const picks = [
+    join(base, archVenvName()),
+    join(base, "blur_env-darwin-arm64"),
+    join(base, "blur_env-darwin-x64"),
+  ];
+  return picks.filter((v, i, arr) => arr.indexOf(v) === i);
+}
+function embeddedVenvDir() {
+  const list = app.isPackaged ? venvCandidatesInResources() : venvCandidatesInDev();
+  for (const v of list) { try { if (existsSync(join(v, "bin", "python3"))) return v; } catch {} }
+  return null;
+}
+function embeddedPythonCandidates() {
+  const baseList = app.isPackaged ? venvCandidatesInResources() : venvCandidatesInDev();
+  return baseList.map(v => join(v, "bin", "python3"));
+}
+function resolvePython() {
+  const candidates = embeddedPythonCandidates();
+  for (const p of candidates) {
+    try {
+      if (p && existsSync(p)) {
+        const venvDir = path.dirname(path.dirname(p)); // .../venv/bin/python3 → .../venv
+        log(`[python] embedded found ${p}`);
+        return { python: p, venvDir };
+      }
+    } catch {}
+  }
+  const want = archVenvName();
+  const where = app.isPackaged ? `Resources/${want}` : `resources/${want}`;
+  const msg = `Embedded Python not found (wanted ${where}).`;
+  log("[python] FATAL:", msg);
+  model_status = { status: "error", message: msg };
+  return null;
+}
 
 /* ============================================================================
    LOGGING (async, non-blocking)
@@ -216,7 +261,6 @@ function isReadOnlyDir(dir) {
 }
 
 async function ensureBlurHomeAndUnpack() {
-  // DEV: do not override a developer's BLUR_HOME; just log what we see
   if (!app.isPackaged) {
     const devRoot = resolve(app.getAppPath(), "resources");
     if (!existsSync(devRoot)) {
@@ -229,11 +273,9 @@ async function ensureBlurHomeAndUnpack() {
   const homePath = homeBlurPath();
   const envSet = !!(process.env.BLUR_HOME && process.env.BLUR_HOME.trim());
   if (!envSet) {
-    // Packaged: use userData (writable) even when app runs from read-only DMG.
     process.env.BLUR_HOME = app.isPackaged ? app.getPath("userData") : homePath;
   }
 
-  // Always read config from the bundle when packaged (true standalone)
   if (app.isPackaged && !process.env.BLUR_CONFIG_PATH) {
     const bundledRoot = getBundledRoot();
     process.env.BLUR_CONFIG_PATH = join(bundledRoot, "config.yaml");
@@ -243,7 +285,6 @@ async function ensureBlurHomeAndUnpack() {
   mkdirSync(BLUR_HOME, { recursive: true });
   log(`[resources] Using BLUR_HOME: ${BLUR_HOME}`);
 
-  // keep Spotlight quiet on models
   try {
     const modelsPath = join(BLUR_HOME, "models");
     mkdirSync(modelsPath, { recursive: true });
@@ -257,12 +298,10 @@ async function ensureBlurHomeAndUnpack() {
     log("[resources] Running from read-only bundle — seeding disabled.");
   }
 
-  // Versioned seed (only when NOT read-only, NOT skipped, and BLUR_HOME != bundle root)
   const skipCopy = process.env.BLUR_SKIP_VERSION_COPY === "1";
   if (!runningFromReadOnly && !skipCopy && bundledRoot && BLUR_HOME !== bundledRoot) {
     const filesCopyIfMissing = ["config.yaml", "acheflip.yaml"];
-    const dirsReplaceOnBump = ["core"]; // immutable/critical payloads
-
+    const dirsReplaceOnBump = ["core"];
     let needsCopy = false;
     try {
       const srcCfg = join(bundledRoot, "config.yaml");
@@ -292,7 +331,6 @@ async function ensureBlurHomeAndUnpack() {
     }
   }
 
-  // one-time models seed (skip when read-only)
   if (!runningFromReadOnly && process.env.BLUR_SKIP_SEED_MODELS !== "1") {
     try {
       const modelsDst = join(BLUR_HOME, "models");
@@ -307,7 +345,6 @@ async function ensureBlurHomeAndUnpack() {
     } catch (e) { log("[resources] Models copy error:", String(e?.message || e)); }
   }
 
-  // export useful env
   process.env.BLUR_RESOURCES_DIR = process.resourcesPath || "";
   process.env.BLUR_PACKAGED = app.isPackaged ? "1" : "0";
   if (!process.env.BLUR_CONFIG_PATH) {
@@ -424,20 +461,6 @@ function resolveCoreModule(backendDir) {
   for (const name of order) { if (existsSync(join(backendDir, name))) return `${basename(name, ".py")}:app`; }
   return null;
 }
-function embeddedPythonCandidates() {
-  // Only our embedded venv (repo ./resources in dev, Resources/ in prod)
-  return [ embeddedPythonBin() ];
-}
-function resolvePython() {
-  for (const p of embeddedPythonCandidates()) {
-    try { if (p && existsSync(p)) { log(`[python] embedded found ${p}`); return p; } } catch {}
-  }
-  const where = app.isPackaged ? "Resources/blur_env-darwin-arm64" : "resources/blur_env-darwin-arm64";
-  const msg = `Embedded Python not found at ${where}.`;
-  log("[python] FATAL:", msg);
-  model_status = { status: "error", message: msg };
-  return null;
-}
 
 /* ============================================================================
    NET / HEALTH
@@ -466,13 +489,11 @@ function buildUvicornArgs(backendDir, useFastLoop = false) {
   return base;
 }
 async function preflightExistingCore() {
-  // If a core is already alive on the port, treat it as the active core (no spawn).
   if (await isCoreHealthy()) {
     log("[main] Preflight: core already healthy on port; skipping spawn.");
     aiReady = true; model_status = { status: "ready", message: "AI Core ready (pre-existing)" };
     return true;
   }
-  // If health is bad but pid file exists, check if process is dead; if dead, remove pid.
   const oldPid = readPidFile();
   if (oldPid && !processExists(oldPid)) {
     log(`[main] Preflight: stale PID ${oldPid} — cleaning.`);
@@ -483,7 +504,6 @@ async function preflightExistingCore() {
 function startAIServer(useFastLoop = false) {
   if (aiProc) { log("[main] AI Core start ignored: already running."); return; }
 
-  // Clear any lingering timers before starting
   if (stderrBudgetTimer) { clearInterval(stderrBudgetTimer); stderrBudgetTimer = null; }
   if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
 
@@ -493,8 +513,11 @@ function startAIServer(useFastLoop = false) {
   const backendDir = findBackendDir();
   if (!backendDir) { model_status = {status:"error", message:"Backend dir not found."}; broadcastStatus(); return; }
 
-  const pythonCommand = resolvePython();
-  if (!pythonCommand) { broadcastStatus(); return; }
+  const py = resolvePython();
+  if (!py) { broadcastStatus(); return; }
+  const pythonCommand = py.python;
+  const VENV_DIR = py.venvDir;
+  const VENV_BIN = join(VENV_DIR, "bin");
 
   const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
   if (!uvicornArgs) { model_status = {status:"error", message:"No core module found to launch."}; broadcastStatus(); return; }
@@ -510,8 +533,6 @@ function startAIServer(useFastLoop = false) {
   log(`[env]   BLUR_CONFIG_PATH=${process.env.BLUR_CONFIG_PATH}`);
   log("--------------------------------");
 
-  const VENV_DIR = embeddedVenvDir();
-  const VENV_BIN = join(VENV_DIR, "bin");
   aiProc = spawn(pythonCommand, uvicornArgs, {
     cwd: backendDir,
     stdio: ["ignore", "pipe", "pipe"],
@@ -585,14 +606,11 @@ function stopAIServer() {
   if (!aiProc) { log("[main] AI Core stop ignored: not running."); removePidFile(); return; }
   log("[main] Stopping AI Core…");
   const pid = aiProc.pid;
-  // Detach listeners immediately
   try { aiProc.stdout?.removeAllListeners?.(); aiProc.stderr?.removeAllListeners?.(); } catch {}
-  // IMMEDIATE SIGKILL (don't wait for graceful shutdown in dev)
   try {
     if (process.platform === "win32") {
       spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { detached: true, stdio: 'ignore' });
     } else {
-      // Kill process group immediately
       try { process.kill(-pid, "SIGKILL"); } catch {}
       try { process.kill(pid, "SIGKILL"); } catch {}
     }
@@ -686,7 +704,6 @@ async function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => { ensureOverlay(mainWindow); bootMark("renderer finished load"); });
   mainWindow.webContents.once("dom-ready", async () => {
     try {
-      // Clear cache ONCE per boot (not per window load)
       if (!cacheCleanedThisBoot) {
         await session.defaultSession.clearCache();
         cacheCleanedThisBoot = true;
@@ -704,7 +721,6 @@ async function createWindow() {
     await mainWindow.loadURL(DEV_URL).catch(e => log("[dev] loadURL error:", e));
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
-    // prefer app.asar/dist, fallback to Resources/dist
     try { await mainWindow.loadFile(join(process.resourcesPath, "app.asar", "dist", "index.html")); }
     catch { await mainWindow.loadFile(join(process.resourcesPath, "dist", "index.html")); }
   }
@@ -751,10 +767,8 @@ else {
     nukeGpuCaches("boot");
     showSplash(model_status.message);
 
-    // Register IPC BEFORE renderer loads
     initPrefsIPC(); bootMark("prefs ready");
 
-    // resource prep in parallel with window boot
     const ensureP = ensureBlurHomeAndUnpack()
       .then(() => bootMark("env ensured"))
       .catch(e => log("[env] ensure failed:", String(e?.message||e)));
@@ -773,7 +787,6 @@ else {
         model_status = { status: "starting", message: "initializing AI Core…" };
         broadcastStatus();
 
-        // single backoff loop
         let delay = 800;
         const tick = async () => {
           const ok = await isCoreHealthy().catch(()=>false);
@@ -787,7 +800,6 @@ else {
             updateSplash(`waiting on AI Core… (next check ${Math.round(delay/1000)}s)`, "warn");
           }
         };
-        // Ensure no stale timer before creating new one
         if (probeTimer) { clearInterval(probeTimer); probeTimer = null; }
         probeTimer = setInterval(tick, 1200);
         tick();
@@ -821,7 +833,7 @@ app.on("child-process-gone", (_e, details) => {
 function cleanQuit() {
   if (isQuitting) return; isQuitting = true;
   log("[quit] Starting clean shutdown sequence");
-  
+
   // Kill orphaned cores FIRST
   killOrphanedCores();
 
@@ -863,6 +875,7 @@ function cleanQuit() {
   app.quit();
   if (forceQuitTimer) { clearTimeout(forceQuitTimer); forceQuitTimer = null; }
 }
+
 app.on("before-quit", (e) => { if (!isQuitting) { e.preventDefault(); cleanQuit(); } });
 app.on("window-all-closed", () => { if (!isMac) cleanQuit(); });
 app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
