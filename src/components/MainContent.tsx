@@ -1,7 +1,6 @@
-
 // file: /opt/blurface/src/components/MainContent.tsx
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -102,6 +101,18 @@ export const MainContent: React.FC<MainContentProps> = ({ messages, streamingTok
   useEffect(() => {
     onContentAppended();
   }, [messages, streamingToken, onContentAppended]);
+
+  const prevMessageCountRef = useRef(messages.length);
+  useEffect(() => {
+    if (messages.length > prevMessageCountRef.current) {
+      // New message added - force scroll immediately
+      requestAnimationFrame(() => {
+        scrollToBottom(true);
+      });
+    }
+    prevMessageCountRef.current = messages.length;
+  }, [messages.length, scrollToBottom]);
+
 
   return (
     <div className="relative h-full">
