@@ -11,8 +11,8 @@
 /out/
 /models/
 /dist/
-/arm64/
-/x64/
+/_Intel/
+/_MSeries/
 /vendor_wheels/
 
 # Log files
