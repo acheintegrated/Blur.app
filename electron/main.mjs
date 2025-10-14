@@ -14,7 +14,7 @@
 // - ARCH AWARE: picks blur_env-darwin-{arm64|x64} at runtime; universal-ready.
 
 import { app, BrowserWindow, shell, ipcMain, powerMonitor, session } from "electron";
-import { spawn, exec } from "child_process";
+import { spawn, exec, execSync } from "child_process";
 import { fileURLToPath } from "url";
 import path, { dirname, join, resolve, basename } from "path";
 import os from "os";
@@ -124,53 +124,70 @@ function getBundledRoot() { return process.resourcesPath || join(__dirname, ".."
 
 /* -------- ARCH-AWARE VENV SELECTION (universal-ready) -------- */
 function archVenvName() {
-  const a = process.arch; // "arm64" | "x64" | ...
+  const a = process.arch;
   if (a === "arm64") return "blur_env-darwin-arm64";
   if (a === "x64")   return "blur_env-darwin-x64";
-  return "blur_env-darwin-arm64";
+  
+  // CRITICAL: Don't default to arm64 for unknown architectures
+  throw new Error(`Unsupported architecture: ${a}`);
 }
 function venvCandidatesInResources() {
   const base = getBundledRoot();
-  const picks = [
-    join(base, archVenvName()),                 // matching arch first
-    join(base, "blur_env-darwin-arm64"),       // fallback #1
-    join(base, "blur_env-darwin-x64"),         // fallback #2
-  ];
-  return picks.filter((v, i, arr) => arr.indexOf(v) === i);
+  const matchingVenv = join(base, archVenvName());
+  
+  // Only return the exact matching venv, no fallbacks
+  // This forces the build to fail fast if wrong venv is packaged
+  return [matchingVenv];
 }
+
+// Same for dev:
+// Same for dev:
 function venvCandidatesInDev() {
   const base = join(app.getAppPath(), "resources");
-  const picks = [
-    join(base, archVenvName()),
-    join(base, "blur_env-darwin-arm64"),
-    join(base, "blur_env-darwin-x64"),
-  ];
-  return picks.filter((v, i, arr) => arr.indexOf(v) === i);
-}
-function embeddedVenvDir() {
-  const list = app.isPackaged ? venvCandidatesInResources() : venvCandidatesInDev();
-  for (const v of list) { try { if (existsSync(join(v, "bin", "python3"))) return v; } catch {} }
-  return null;
+  const matchingVenv = join(base, archVenvName());
+  return [matchingVenv];
 }
 function embeddedPythonCandidates() {
   const baseList = app.isPackaged ? venvCandidatesInResources() : venvCandidatesInDev();
   return baseList.map(v => join(v, "bin", "python3"));
 }
+
 function resolvePython() {
   const candidates = embeddedPythonCandidates();
+  
+  log(`[python] Looking for Python in ${candidates.length} location(s):`);
+  candidates.forEach(c => log(`[python]   - ${c}`));
+  
   for (const p of candidates) {
     try {
       if (p && existsSync(p)) {
-        const venvDir = path.dirname(path.dirname(p)); // .../venv/bin/python3 → .../venv
-        log(`[python] embedded found ${p}`);
-        return { python: p, venvDir };
+        // Verify it's actually executable
+        try {
+          const version = execSync(`"${p}" --version`, { 
+            encoding: 'utf8',
+            timeout: 5000 
+          }).trim();
+          
+          const venvDir = path.dirname(path.dirname(p));
+          log(`[python] ✅ Found working Python: ${p} (${version})`);
+          return { python: p, venvDir };
+        } catch (execError) {
+          log(`[python] ⚠️  Python exists but not executable: ${p}`);
+          log(`[python]     Error: ${execError.message}`);
+          continue;
+        }
       }
-    } catch {}
+    } catch (e) {
+      log(`[python] Error checking ${p}: ${e.message}`);
+    }
   }
+  
+  // Only reached if no valid Python found
   const want = archVenvName();
   const where = app.isPackaged ? `Resources/${want}` : `resources/${want}`;
-  const msg = `Embedded Python not found (wanted ${where}).`;
+  const msg = `Python not found for ${process.arch}. Expected: ${where}/bin/python3`;
   log("[python] FATAL:", msg);
+  log(`[python] Checked paths:`, candidates);
   model_status = { status: "error", message: msg };
   return null;
 }

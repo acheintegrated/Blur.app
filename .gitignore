@@ -6,11 +6,14 @@
 /.vite/
 
 # Electron build output
-/build
-/release
-/out
-/models
-/dist
+/build/
+/release/
+/out/
+/models/
+/dist/
+/arm64/
+/x64/
+/vendor_wheels/
 
 # Log files
 *.log
@@ -28,6 +31,7 @@ resources/blur_env-darwin-x64/
 resources/core/.venv/
 resources/sessions/
 blur_env-darwin-arm64/
+blur_env-darwin-x64/
 
 # Llama Bin
 bin/

@@ -1,9 +1,10 @@
-// build/afterPack.cjs — v10 (robust copy + dual-venv + universal-friendly)
+// build/afterPack.cjs — v11 (auto xattr clear for installed app)
 // - FIX: EPERM on numpy dirs by replacing hand-rolled recursion with fs.cpSync (symlink-aware)
 // - FIX: use lstatSync; preserve symlinks; pre-clean destination (rm -rf) before copy
 // - ADD: dual venv mode (BLUR_VENV_MODE=dual) or single (BLUR_VENV_NAME=...)
 // - ADD: strict mode (STRICT_AFTERPACK=1) to fail on missing assets
 // - ADD: quarantine scrub for .app (xattr -dr com.apple.quarantine)
+// - ADD: AUTO clear quarantine in /Applications if app exists there
 // - ADD: chmod +x for bin/* in venvs + core/bin
 // - SAFE: filters out __pycache__ and *.pyc when copying
 //
@@ -30,9 +31,13 @@ function rmrf(p) {
 }
 
 function clearQuarantine(p) {
+  if (!exists(p)) return;
   try {
-    execSync(`xattr -dr com.apple.quarantine "${p}"`, { stdio: "ignore" });
-  } catch {}
+    console.log(`[afterPack] Clearing quarantine: ${p}`);
+    execSync(`xattr -cr "${p}"`, { stdio: "inherit" });
+  } catch (e) {
+    console.warn(`[afterPack] Failed to clear quarantine on ${p}: ${e.message}`);
+  }
 }
 
 function chmodExecRecursive(dir) {
@@ -62,7 +67,7 @@ function copyTree(src, dst) {
   ensureDir(path.dirname(dst));
 
   if (fs.cpSync) {
-    // keep symlinks; don’t dereference; filter pycache junk
+    // keep symlinks; don't dereference; filter pycache junk
     fs.cpSync(src, dst, {
       recursive: true,
       force: true,
@@ -166,6 +171,9 @@ module.exports = async (context) => {
   for (const v of venvs) {
     const srcV = path.join(projectDir, v);
     const dstV = path.join(resDir, v);
+    
+    console.log(`[afterPack] Processing venv: ${v}`);
+    
     if (!exists(dstV)) {
       if (exists(srcV)) {
         console.log(`[afterPack] copying venv → ${v}`);
@@ -178,11 +186,19 @@ module.exports = async (context) => {
           console.warn(msg);
         }
       } else {
-        missing.push(`[venv missing in project]: ${srcV}`);
+        const msg = `[afterPack] ❌ Source venv not found: ${srcV}`;
+        console.error(msg);
+        missing.push(msg);
       }
     }
+    
     const pythonExe = path.join(dstV, "bin", "python3");
-    if (!exists(pythonExe)) missing.push(`[venv python missing]: ${pythonExe}`);
+    if (!exists(pythonExe)) {
+      const msg = `[afterPack] ❌ Python not found in venv: ${pythonExe}`;
+      console.error(msg);
+      missing.push(msg);
+    }
+    
     chmodExecRecursive(path.join(dstV, "bin"));
   }
 
@@ -190,8 +206,18 @@ module.exports = async (context) => {
   chmodExecRecursive(resCoreBin);
 
   // 5) quarantine clear (macOS)
-  if (process.platform === "darwin" && exists(appPath)) {
-    clearQuarantine(appPath);
+  if (process.platform === "darwin") {
+    // Clear quarantine on build output
+    if (exists(appPath)) {
+      clearQuarantine(appPath);
+    }
+    
+    // ALSO clear quarantine in /Applications if app exists there
+    const installedAppPath = path.join("/Applications", `${appName}.app`);
+    if (exists(installedAppPath)) {
+      console.log(`[afterPack] Detected installed app, clearing quarantine: ${installedAppPath}`);
+      clearQuarantine(installedAppPath);
+    }
   }
 
   if (missing.length) {
