@@ -44,6 +44,7 @@ function killOrphanedCores() {
         pids.forEach(pid => {
           try {
             process.kill(Number(pid), 'SIGKILL');
+            // Use console.log directly since log() isn't ready yet
             console.log(`[cleanup] Killed orphaned process on port ${CORE_PORT}: ${pid}`);
           } catch {}
         });
@@ -51,7 +52,6 @@ function killOrphanedCores() {
     });
   } catch {}
 }
-killOrphanedCores();
 
 /* ============================================================================
    FLAGS & PERF
@@ -482,17 +482,25 @@ function resolveCoreModule(backendDir) {
 /* ============================================================================
    NET / HEALTH
 ============================================================================ */
-function ping(urlStr) { return new Promise((resolve, reject) => {
-  try {
-    const lib = urlStr.startsWith("https:") ? https : http;
-    const req = lib.get(urlStr, { timeout: 1200 }, (res) => {
-      const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
-      res.resume(); ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
-    });
-    req.on("error", reject);
-    req.on("timeout", () => req.destroy(new Error("timeout")));
-  } catch (e) { reject(e); }
-});}
+function ping(urlStr, timeoutMs = 3000) { 
+  return new Promise((resolve, reject) => {
+    try {
+      const lib = urlStr.startsWith("https:") ? https : http;
+      const req = lib.get(urlStr, { timeout: timeoutMs }, (res) => {
+        const ok = (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 400;
+        res.resume(); 
+        ok ? resolve(true) : reject(new Error(`status ${res.statusCode}`));
+      });
+      req.on("error", reject);
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("timeout"));
+      });
+    } catch (e) { 
+      reject(e); 
+    }
+  });
+}
 async function isCoreHealthy() { try { return await ping(CORE_HEALTH); } catch { return false; } }
 
 /* ============================================================================
@@ -506,16 +514,24 @@ function buildUvicornArgs(backendDir, useFastLoop = false) {
   return base;
 }
 async function preflightExistingCore() {
+  // Give the kill a moment to complete
+  await new Promise(resolve => setTimeout(resolve, 500));
+  
+  // Now check if something is STILL healthy (shouldn't be)
   if (await isCoreHealthy()) {
-    log("[main] Preflight: core already healthy on port; skipping spawn.");
-    aiReady = true; model_status = { status: "ready", message: "AI Core ready (pre-existing)" };
+    log("[main] WARNING: Core still healthy after cleanup - this is unexpected but proceeding");
+    aiReady = true; 
+    model_status = { status: "ready", message: "AI Core ready (pre-existing)" };
     return true;
   }
+  
+  // Clean up stale PID file
   const oldPid = readPidFile();
-  if (oldPid && !processExists(oldPid)) {
-    log(`[main] Preflight: stale PID ${oldPid} — cleaning.`);
+  if (oldPid) {
+    log(`[main] Preflight: cleaning stale PID ${oldPid}`);
     removePidFile();
   }
+  
   return false;
 }
 function startAIServer(useFastLoop = false) {
@@ -779,6 +795,7 @@ else {
 
   app.whenReady().then(async () => {
     initLogger(); bootMark("logger ready");
+    killOrphanedCores(); 
     ensureUserDataScaffold();
     log(`[startup] userData = ${app.getPath("userData")}`);
     nukeGpuCaches("boot");

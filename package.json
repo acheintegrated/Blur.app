@@ -5,23 +5,18 @@
   "main": "electron/main.mjs",
   "type": "module",
   "scripts": {
-    "prep:venv": "bash scripts/build_venv_core.sh",
+    "prep:venv:arm64": "bash scripts/build_venv_core.sh arm64",
+    "prep:venv:x64": "bash scripts/build_venv_core.sh x64",
     "dev": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml ELECTRON_ENABLE_LOGGING=1 ELECTRON_DISABLE_SECURITY_WARNINGS=1 concurrently --raw -n vite,electron \"vite --port 6969 --strictPort --host --clearScreen=false\" \"wait-on tcp:6969 && electron .\"",
     "electron": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml electron .",
     "build": "vite build",
     "preview": "vite preview",
     "start": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml electron .",
-    
-    "dist": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder",
-    
-    "pack:dmg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-x64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --x64",
-    
-    "pack:dmg:arm64": "echo VENV_NAME=$BLUR_VENV_NAME && npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-arm64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem npx electron-builder --mac dmg --arm64",
-    
-    "pack:dmg:universal": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_MODE=dual BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --universal",
-    
-    "dist:mac:pkg": "npm run prep:venv && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-arm64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
-    
+    "dist": "npm run prep:venv:arm64 && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder",
+    "pack:dmg": "npm run prep:venv:x64 && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-x64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --x64",
+    "pack:dmg:arm64": "echo VENV_NAME=$BLUR_VENV_NAME && npm run prep:venv:arm64 && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-arm64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem npx electron-builder --mac dmg --arm64",
+    "pack:dmg:universal": "npm run prep:venv:arm64 && npm run prep:venv:x64 && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_MODE=dual BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac dmg --universal",
+    "dist:mac:pkg": "npm run prep:venv:arm64 && vite build && STRICT_AFTERPACK=1 BLUR_BUNDLE_VENV=1 BLUR_VENV_NAME=blur_env-darwin-arm64 BLUR_BUNDLE_MODELS=$HOME/blur/models BLUR_BUNDLE_ROOT=$HOME/blur BLUR_BUNDLE_BLURCHIVE=$HOME/blur/core/ouinet/blurchive/ecosystem electron-builder --mac pkg --arm64",
     "dist:win": "vite build && electron-builder --win nsis",
     "dist:linux": "vite build && electron-builder --linux AppImage deb",
     "rebuild:native": "electron-rebuild -f -w sqlite3",
@@ -48,10 +43,7 @@
     "asar": true,
     "asarUnpack": [
       "**/*.node",
-      "**/*.dylib",
-      "blur_env-darwin-*/**",
-      "core/**",
-      "models/**"
+      "**/*.dylib"
     ],
     "afterPack": "build/afterPack.cjs",
     "files": [
@@ -66,14 +58,31 @@
       "!**/*.map"
     ],
     "extraResources": [
-      { "from": "electron/backend", "to": "core" },
-      { "from": "core/ouinet/blurchive/ecosystem", "to": "core/ouinet/blurchive/ecosystem" },
-      { "from": "config.yaml", "to": "config.yaml" },
-      { "from": "acheflip.yaml", "to": "acheflip.yaml" },
-      { "from": "models", "to": "models" }
+      {
+        "from": "electron/backend",
+        "to": "core"
+      },
+      {
+        "from": "core/ouinet/blurchive/ecosystem",
+        "to": "core/ouinet/blurchive/ecosystem"
+      },
+      {
+        "from": "config.yaml",
+        "to": "config.yaml"
+      },
+      {
+        "from": "acheflip.yaml",
+        "to": "acheflip.yaml"
+      },
+      {
+        "from": "models",
+        "to": "models"
+      }
     ],
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.productivity",
       "identity": null,
       "hardenedRuntime": false
@@ -81,10 +90,22 @@
     "dmg": {
       "sign": false,
       "background": "build/dmgbg.png",
-      "window": { "width": 650, "height": 500 },
+      "window": {
+        "width": 650,
+        "height": 500
+      },
       "contents": [
-        { "x": 470, "y": 240, "type": "link", "path": "/Applications" },
-        { "x": 180, "y": 240, "type": "file" }
+        {
+          "x": 470,
+          "y": 240,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 180,
+          "y": 240,
+          "type": "file"
+        }
       ]
     }
   },

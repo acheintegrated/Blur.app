@@ -1,20 +1,7 @@
-// build/afterPack.cjs — v11 (auto xattr clear for installed app)
-// - FIX: EPERM on numpy dirs by replacing hand-rolled recursion with fs.cpSync (symlink-aware)
-// - FIX: use lstatSync; preserve symlinks; pre-clean destination (rm -rf) before copy
-// - ADD: dual venv mode (BLUR_VENV_MODE=dual) or single (BLUR_VENV_NAME=...)
-// - ADD: strict mode (STRICT_AFTERPACK=1) to fail on missing assets
-// - ADD: quarantine scrub for .app (xattr -dr com.apple.quarantine)
-// - ADD: AUTO clear quarantine in /Applications if app exists there
-// - ADD: chmod +x for bin/* in venvs + core/bin
-// - SAFE: filters out __pycache__ and *.pyc when copying
-//
-// ENV knobs:
-//   BLUR_VENV_MODE=dual                      → expects blur_env-darwin-x64 and blur_env-darwin-arm64
-//   BLUR_VENV_NAME=blur_env-darwin-arm64     → single venv name (overrides dual)
-//   STRICT_AFTERPACK=1                        → throw on any missing asset
-//   BLUR_BUNDLE_ROOT=/abs/path                → source root override (expects /core under it)
-//   BLUR_BUNDLE_BLURCHIVE=/abs/path          → blurchive source override
-//   BLUR_REFRESH_BLURCHIVE=1                 → force re-sync blurchive even if exists
+// build/afterPack.cjs — v13 (FIX symlinks by dereferencing)
+// - FIX: Set `dereference: true` in fs.cpSync to resolve symlinks like `python3`.
+// - FIX: Use `cp -aL` in fallback to ensure symlinks are followed.
+// - REVERT: Venv copying is now handled here again, not in package.json's extraResources.
 
 const fs = require("fs");
 const path = require("path");
@@ -51,7 +38,6 @@ function chmodExecRecursive(dir) {
       if (st.isDirectory()) {
         stack.push(p);
       } else {
-        // only mark likely executables
         if (/\/bin\/[^/]+$/.test(p) || /(\.sh|\.bin|^activate)$/.test(name)) {
           try { fs.chmodSync(p, 0o755); } catch {}
         }
@@ -60,18 +46,17 @@ function chmodExecRecursive(dir) {
   }
 }
 
-// Prefer fs.cpSync (Node ≥16.7). Fallback to `cp -a`.
+// **KEY CHANGE HERE**: This function now resolves symlinks.
 function copyTree(src, dst) {
   if (!exists(src)) return false;
   rmrf(dst);
   ensureDir(path.dirname(dst));
 
   if (fs.cpSync) {
-    // keep symlinks; don't dereference; filter pycache junk
     fs.cpSync(src, dst, {
       recursive: true,
       force: true,
-      dereference: false,
+      dereference: true, // <-- The fix! This copies file content, not the link.
       errorOnExist: false,
       filter: (p) => {
         const base = path.basename(p);
@@ -83,9 +68,9 @@ function copyTree(src, dst) {
     return true;
   }
 
-  // fallback for older Node: cp -a preserves links, perms, times
-  const res = spawnSync("cp", ["-a", src + "/.", dst], { stdio: "inherit" });
-  if (res.status !== 0) throw new Error(`cp -a failed: ${src} -> ${dst}`);
+  // Fallback for older Node: `cp -aL` follows all symlinks.
+  const res = spawnSync("cp", ["-aL", src + "/.", dst], { stdio: "inherit" });
+  if (res.status !== 0) throw new Error(`cp -aL failed: ${src} -> ${dst}`);
   return true;
 }
 
@@ -103,66 +88,19 @@ function resolveAppResources(context) {
 
 module.exports = async (context) => {
   const strict = process.env.STRICT_AFTERPACK === "1";
-  const refreshBlurchive = process.env.BLUR_REFRESH_BLURCHIVE === "1";
   const dualVenv = process.env.BLUR_VENV_MODE === "dual";
   const singleVenv = process.env.BLUR_VENV_NAME || null;
 
   if (!dualVenv && !singleVenv && strict) {
-    throw new Error("[afterPack] must set BLUR_VENV_NAME (single) or BLUR_VENV_MODE=dual when STRICT_AFTERPACK=1");
+    throw new Error("[afterPack] must set BLUR_VENV_NAME (single) or BLUR_VENV_MODE=dual");
   }
 
   const { appName, appOutDir, appPath, resDir } = resolveAppResources(context);
   const projectDir = context?.packager?.projectDir || process.cwd();
 
-  const resCore      = path.join(resDir, "core");
-  const resCoreBin   = path.join(resCore, "bin");
-  const resBlurchive = path.join(resCore, "ouinet", "blurchive", "ecosystem");
-  const dstChunks    = path.join(resBlurchive, "knowledge_chunks.jsonl");
+  const resCoreBin   = path.join(resDir, "core", "bin");
 
-  const envRoot      = process.env.BLUR_BUNDLE_ROOT;
-  const envCore      = envRoot ? path.join(envRoot, "core") : null;
-  const envBlurchive = process.env.BLUR_BUNDLE_BLURCHIVE || null;
-
-  const repoCoreA      = path.join(projectDir, "core");
-  const repoCoreB      = path.join(projectDir, "electron", "backend");
-  const repoBlurchiveA = path.join(repoCoreA, "ouinet", "blurchive", "ecosystem");
-  const repoBlurchiveB = path.join(repoCoreB, "ouinet", "blurchive", "ecosystem");
-
-  const srcCore =
-    (envCore && exists(envCore)) ? envCore :
-    (exists(repoCoreA))          ? repoCoreA :
-    (exists(repoCoreB))          ? repoCoreB : null;
-
-  const srcBlurchive =
-    (envBlurchive && exists(envBlurchive)) ? envBlurchive :
-    (exists(repoBlurchiveA))               ? repoBlurchiveA :
-    (exists(repoBlurchiveB))               ? repoBlurchiveB : null;
-
-  // 1) Ensure core in Resources/core
-  if (!exists(path.join(resCore, "convo_chat_core.py")) && srcCore) {
-    console.log(`[afterPack] core missing → copying from: ${srcCore}`);
-    copyTree(srcCore, resCore);
-  } else if (!exists(path.join(resCore, "convo_chat_core.py"))) {
-    const msg = "[afterPack] ❌ core missing and no source found";
-    if (strict) throw new Error(msg);
-    console.warn(msg);
-  }
-
-  // 2) Ensure blurchive (optional, warn if missing chunks)
-  if (srcBlurchive) {
-    const needSync = refreshBlurchive || !exists(resBlurchive) || !exists(dstChunks);
-    if (needSync) {
-      console.log(`[afterPack] syncing blurchive → ${resBlurchive}`);
-      copyTree(srcBlurchive, resBlurchive);
-    }
-  }
-  if (exists(resBlurchive) && !exists(dstChunks)) {
-    const msg = `[afterPack] ⚠ blurchive present but knowledge_chunks.jsonl missing: ${dstChunks}`;
-    if (strict) throw new Error(msg);
-    console.warn(msg);
-  }
-
-  // 3) Venvs: dual or single
+  // Venvs: Dual or single copy logic is now back in this script.
   const venvs = dualVenv
     ? ["blur_env-darwin-x64", "blur_env-darwin-arm64"]
     : (singleVenv ? [singleVenv] : []);
@@ -174,27 +112,19 @@ module.exports = async (context) => {
     
     console.log(`[afterPack] Processing venv: ${v}`);
     
-    if (!exists(dstV)) {
-      if (exists(srcV)) {
-        console.log(`[afterPack] copying venv → ${v}`);
-        try {
-          copyTree(srcV, dstV);
-        } catch (e) {
-          // surface a clearer error for numpy/symlink weirdness
-          const msg = `[afterPack] failed to copy ${v}: ${e?.message || e}`;
-          if (strict) throw new Error(msg);
-          console.warn(msg);
-        }
-      } else {
+    if (exists(srcV)) {
+        console.log(`[afterPack] Copying and dereferencing venv → ${v}`);
+        copyTree(srcV, dstV);
+    } else {
         const msg = `[afterPack] ❌ Source venv not found: ${srcV}`;
         console.error(msg);
         missing.push(msg);
-      }
+        continue;
     }
     
     const pythonExe = path.join(dstV, "bin", "python3");
     if (!exists(pythonExe)) {
-      const msg = `[afterPack] ❌ Python not found in venv: ${pythonExe}`;
+      const msg = `[afterPack] ❌ Python not found in packaged venv: ${pythonExe}`;
       console.error(msg);
       missing.push(msg);
     }
@@ -202,20 +132,16 @@ module.exports = async (context) => {
     chmodExecRecursive(path.join(dstV, "bin"));
   }
 
-  // 4) perms for core/bin
+  // Perms for core/bin
   chmodExecRecursive(resCoreBin);
 
-  // 5) quarantine clear (macOS)
+  // Quarantine clear (macOS)
   if (process.platform === "darwin") {
-    // Clear quarantine on build output
     if (exists(appPath)) {
       clearQuarantine(appPath);
     }
-    
-    // ALSO clear quarantine in /Applications if app exists there
     const installedAppPath = path.join("/Applications", `${appName}.app`);
     if (exists(installedAppPath)) {
-      console.log(`[afterPack] Detected installed app, clearing quarantine: ${installedAppPath}`);
       clearQuarantine(installedAppPath);
     }
   }
