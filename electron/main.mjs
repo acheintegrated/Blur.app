@@ -30,7 +30,7 @@ const __dirname = dirname(__filename);
 /* ============================================================================
    GLOBALS (pre-init)
 ============================================================================ */
-const CORE_PORT = String(process.env.BLUR_CORE_PORT || "8000");
+const CORE_PORT = String(process.env.BLUR_CORE_PORT || "25421");
 
 /* ============================================================================
    AGGRESSIVE CLEANUP ON BOOT (kill orphaned processes)
@@ -86,7 +86,7 @@ const CORE_HOST = process.env.BLUR_CORE_HOST || "127.0.0.1";
 const CORE_BASE = `http://${CORE_HOST}:${CORE_PORT}`;
 const CORE_HEALTH = `${CORE_BASE}/healthz`;
 
-const DEV_URL = process.env.VITE_DEV_SERVER_URL || `http://localhost:6969`;
+const DEV_URL = process.env.VITE_DEV_SERVER_URL || `http://localhost:25329`;
 const APP_NAME = "Blur";
 app.setName(APP_NAME);
 const appDataRoot = app.getPath("appData");
@@ -549,8 +549,8 @@ function startAIServer(useFastLoop = false) {
   const py = resolvePython();
   if (!py) { broadcastStatus(); return; }
   const pythonCommand = py.python;
-  const VENV_DIR = py.venvDir;
-  const VENV_BIN = join(VENV_DIR, "bin");
+  const VENV_DIR = py.venvDir; // <--- This is the resolved venv root
+  const VENV_BIN = join(VENV_DIR, "bin"); // <--- This is the resolved venv bin
 
   const uvicornArgs = buildUvicornArgs(backendDir, useFastLoop);
   if (!uvicornArgs) { model_status = {status:"error", message:"No core module found to launch."}; broadcastStatus(); return; }
@@ -572,12 +572,12 @@ function startAIServer(useFastLoop = false) {
     env: {
       ...process.env,
       PYTHONDONTWRITEBYTECODE: "1",
-      PYTHONNOUSERSITE: "1",
+      PYTHONNOUSERSITE: "1", // <-- Already setting 1
       BLUR_STATE_DIR: app.getPath("userData"),
       VIRTUAL_ENV: VENV_DIR,
-      PATH: [VENV_BIN, process.env.PATH || ""].join(path.delimiter),
+      PATH: [VENV_BIN, process.env.PATH || ""].join(path.delimiter), // <-- Path is being set correctly
       PYTHONUNBUFFERED: "1",
-      PYTHONHOME: "",
+      PYTHONHOME: "", // <-- Already clearing
       PYTHONPATH: [backendDir, process.env.PYTHONPATH || ""].filter(Boolean).join(path.delimiter),
       BLUR_CORE_PORT: CORE_PORT,
       KMP_DUPLICATE_LIB_OK: "TRUE",

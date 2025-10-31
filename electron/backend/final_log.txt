@@ -1,6 +1,12 @@
 Script started on Wed Sep 10 11:17:14 2025
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                      ]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004h[7mpython convo_chat_core.py[27m
-[K[A[43C[27mp[27my[27mt[27mh[27mo[27mn[27m [27mc[27mo[27mn[27mv[27mo[27m_[27mc[27mh[27ma[27mt[27m_[27mc[27mo[27mr[27me[27m.[27mp[27my[1B[K[?2004l
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                     
+ 
+]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend
+[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004h[7mpython convo_chat_core.py[27m
+
+[K[A[43C[27mp[27my[27mt[27mh[27mo[27mn[27m [27mc[27mo[27mn[27mv[27mo[27m_[27mc[27mh[27ma[27mt[27m_[27mc[27mo[27mr[27me[27m.[27mp[27my[1B
+[K[?2004l
+
 INFO:     --- Blur Core v4.7 (Lang-Hysteresis) Booting ---
 INFO:     Reading config: /opt/blur/config.yaml
 /opt/blurface/electron/backend/convo_chat_core.py:537: DeprecationWarning: 
@@ -53,7 +59,11 @@ ggml_metal_init: skipping kernel_cpy_f32_bf16                      (not supporte
 ggml_metal_init: skipping kernel_cpy_bf16_f32                      (not supported)
 ggml_metal_init: skipping kernel_cpy_bf16_bf16                     (not supported)
 INFO:     ✅ Vessel 'qwen3_4b_unified' online (qwen2, role=chat/safety).
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                      ]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004hppython convo_chat_core.py[?2004l
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                     
+ 
+]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend
+[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004hppython convo_chat_core.py[?2004l
+
 INFO:     --- Blur Core v4.7 (Lang-Hysteresis) Booting ---
 INFO:     Reading config: /opt/blur/config.yaml
 /opt/blurface/electron/backend/convo_chat_core.py:555: DeprecationWarning: 
@@ -106,7 +116,11 @@ ggml_metal_init: skipping kernel_cpy_f32_bf16                      (not supporte
 ggml_metal_init: skipping kernel_cpy_bf16_f32                      (not supported)
 ggml_metal_init: skipping kernel_cpy_bf16_bf16                     (not supported)
 INFO:     ✅ Vessel 'qwen3_4b_unified' online (qwen2, role=chat/safety).
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                      ]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004hppython convo_chat_core.py[?2004l
+[1m[7m%[27m[1m[0m                                                                                                                                                                                                     
+ 
+]7;file://glyphis-MacBook-Pro.local/opt/blurface/electron/backend
+[0m[27m[24m[J(blur_env) g@glyphis-MacBook-Pro backend % [K[?2004hppython convo_chat_core.py[?2004l
+
 INFO:     --- Blur Core v4.7 (Lang-Hysteresis) Booting ---
 INFO:     Reading config: /opt/blur/config.yaml
 /opt/blurface/electron/backend/convo_chat_core.py:421: DeprecationWarning: 
@@ -115,7 +129,7 @@ INFO:     Reading config: /opt/blur/config.yaml
         Read more about it in the
         [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
         
-  @app.on_event("startup")
+  @app.on_event("startup")25421
 /opt/blurface/electron/backend/convo_chat_core.py:467: DeprecationWarning: 
         on_event is deprecated, use lifespan event handlers instead.
 

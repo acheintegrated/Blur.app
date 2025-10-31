@@ -11,7 +11,7 @@ export default defineConfig(({ command }) => ({
   base: command === 'serve' ? '/' : './',
 
   server: {
-    port: 6969,
+    port: 25329,
     strictPort: true,
     host: true,
     open: false,

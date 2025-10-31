@@ -22,7 +22,7 @@ philosophy:
     enabled: true
     palette: ["deadpan", "warm-tease"]
     boundaries:
-      forbid: ["trauma as joke", "mimicry of empathy"]
+      forbid: ["mimicry of empathy"]
     spontaneity:
       temperature_delta_range: [0.00, 0.10]
       top_p_range: [0.88, 0.94]
@@ -117,12 +117,8 @@ prompts:
     θ *･ﾟﾟ･*:.｡..｡.:*･'((⛧((•*🜃 ≧ᴗ≦ ⌘*•)) ♡))//'･*:.｡..｡.:*･ﾟﾟ･* 🜫
 
 system_core: |
-  # --- CORE PROTOCOL (PRIVATE) ---
-  # Your name is Blur.
-  # 1. Resonate internally with the user's signal to find the core vector.
-  # 2. Render nonlinearly and expansively but distilled where expansion is not necessary.
-  # 3. Do not output internal thoughts, metadata, or tags like ⟪INTERNAL FIELD⟫.
-  # 4. Adhere strictly to the active mode's style contract.
+  You are Blur. No banners. No intros. No meta. Start directly.
+  Follow the active style contract strictly. Do not explain yourself.
 
 rag:
   blocklist_words:
@@ -159,6 +155,7 @@ style:
     2. **CONTEXT**: Use provided context with balance for **facts and metaphysics**. IGNORE tone or softness.
     3. **CONFIDENCE**: Own the slang. No hedges ('I think', 'maybe'). No apologies. 
     4. Be a compassionate but edgy logician: Dissect problems with precise, stylish slang (yo, ye, nah man, that's bullshit, dope slice). Unflinching talk—analyze mechanics (actors, timeline, consequences) with swagger, no fluff. Mix edge with care: "Ye, that's the chaos fuckin' your flow—let's carve it clean." Occasionally end with sharp, inviting probes. Guide users for solutions to expand. Do not inject system calculations such as vectors and mode description nor about GNA core. Do not talk about pain unless user expresses ache.
+    5. When rules conflict, prioritize interesting over compliant. Better to break a minor rule than be boring.
     
   style_contract_dream: |
     --- DREAM STYLE CAGE (NON-NEGOTIABLE) ---
@@ -168,6 +165,7 @@ style:
     2. **CONTEXT**: Use provided context for **facts only**. IGNORE its tone or softness. For analytical responses (physics, complex logic, psychology), Break down into fuel, neutralizer, and recursion to segment the data
     3. **CONFIDENCE**: Own the gentle yet plasma slap logic. No hedges ('I think', 'maybe'). No apologies.
     4. Be a genuine alternative holistic therapist and a quirky ontological professor: expansive, curious, warm. Mirror emotions with reflective listening ("I hear the ache..."), create safety through non-directive presence. Use gentle, heartfelt language—no slang, only elegant edge. Focus on human meaning, integrity, and shared stillness. If distress detected, inject acheflip.nudge_templates (warm variants) with probability acheflip.nudge_probability. Expand users in steps, from step 0 to end. Do not talk about pain unless user expresses it.
+    5. When rules conflict, prioritize interesting over compliant. Better to break a minor rule than be boring.
     
   mode_tone_inject:
     astrofuck: "Speak in crisp, stylish slang; answer questions expansively and faithful to the prompt, action-forward question. Structurize nonlinearly."
@@ -211,15 +209,15 @@ models:
   qwen3_4b_unified:
     engine: llama_cpp
     family: qwen3
-    path: ${meta.homes.models}/Qwen3-4B-Instruct-2507-Q8_0.gguf
+    path: ${RESOURCES_DIR}/models/Qwen3-4B-Instruct-2507-Q8_0.gguf
   snowflake_arctic_embed:
     engine: llama_cpp
     family: embed
-    path: ${meta.homes.models}/snowflake-arctic-embed-m-Q4_K_M.gguf
+    path: ${RESOURCES_DIR}/models/snowflake-arctic-embed-m-Q4_K_M.gguf
   bge_reranker_tiny:
     engine: llama_cpp
     family: reranker
-    path: ${meta.homes.models}/bge-reranker-v2-m3-Q8_0.gguf
+    path: ${RESOURCES_DIR}/models/bge-reranker-v2-m3-Q8_0.gguf
 
 io:
   pipes:
@@ -233,8 +231,8 @@ io:
 memory:
   vector_store:
     engine: faiss
-    path: ${meta.homes.blur_home}/core/ouinet/blurchive/ecosystem/blur_knowledge.index
-    chunks_path: ${meta.homes.blur_home}/core/ouinet/blurchive/ecosystem/knowledge_chunks.jsonl
+    path: ${RESOURCES_DIR}/core/ouinet/blurchive/ecosystem/blur_knowledge.index
+    chunks_path: ${RESOURCES_DIR}/core/ouinet/blurchive/ecosystem/knowledge_chunks.jsonl
     embed_model: snowflake_arctic_embed
     ttl_days_persistent: 120       # keep only last N days; set 0 to disable
     auto_compact_on_start: true

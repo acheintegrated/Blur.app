@@ -4,12 +4,12 @@
 const coreAPI = (typeof window !== 'undefined' && window && window.core) ? window.core : null;
 
 // Use a variable to store the resolved base URL
-let resolvedCoreBase = "http://127.0.0.1:8000";
+let resolvedCoreBase = "http://127.0.0.1:25421";
 
 /**
- * Resolves the AI Core base URL, falling back to port 8000.
+ * Resolves the AI Core base URL, falling back to port 25421.
  * The Electron main process's coreAPI is the preferred source.
- * @returns {Promise<string>} The base URL (e.g., "http://127.0.0.1:8000")
+ * @returns {Promise<string>} The base URL (e.g., "http://127.0.0.1:25421")
  */
 export async function initCoreBase() {
   try {

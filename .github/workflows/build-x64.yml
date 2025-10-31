@@ -6,26 +6,25 @@ on:
 
 jobs:
   build-x64:
-    runs-on: macos-13  # This is an Intel Mac!
+    runs-on: macos-13  # Intel Mac runner
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'
 
-      - name: Install dependencies
+      - name: Install npm dependencies
         run: npm ci
 
       - name: Build x64 venv
         run: |
-          # On Intel runner, this will create a true x64 venv
           npm run prep:venv:x64
+          ls -la blur_env-darwin-x64/bin/python3  # Verify it exists
 
       - name: Build Electron app
-        run: |
-          npm run pack:dmg
+        run: npm run pack:dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

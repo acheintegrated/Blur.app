@@ -10,10 +10,10 @@ async function coreBase(): Promise<string> {
     const port =
       (await (window as any)?.env?.get?.("BLUR_CORE_PORT")) ||
         process.env?.BLUR_CORE_PORT ||
-        "8000";
+        "25421";
     return `http://127.0.0.1:${String(port)}`;
   } catch {
-    return "http://127.0.0.1:8000";
+    return "http://127.0.0.1:25421";
   }
 }
 

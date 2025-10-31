@@ -386,7 +386,7 @@ const AppContent: React.FC = () => {
       const sessionId = updated.sessionId ?? null;
       const modeForThisThread: Mode = updated.mode ?? currentMode;
       const params = new URLSearchParams({ prompt: command, mode: modeForThisThread, ...(sessionId && { session_id: sessionId }) });
-      const url = `http://127.0.0.1:8000/generate_response_get?${params.toString()}`;
+      const url = `http://127.0.0.1:25421/generate_response_get?${params.toString()}`;
       const eventSource = new EventSource(url);
       streamConnectionRef.current = eventSource;
 

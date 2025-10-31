@@ -1565,7 +1565,7 @@ if os.getenv("BLUR_PACKAGED")=="1":
                        allow_methods=["*"], allow_headers=["*"],
                        expose_headers=["X-Session-ID","X-TTFT-Last"])
 else:
-    allowed=get_cfg("server.cors_allowed_origins", ["http://localhost:6969","http://127.0.0.1:6969"])
+    allowed=get_cfg("server.cors_allowed_origins", ["http://localhost:25329","http://127.0.0.1:25329"])
     app.add_middleware(CORSMiddleware, allow_origins=allowed, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"],
                        expose_headers=["X-Session-ID","X-TTFT-Last"])
@@ -1984,4 +1984,4 @@ def on_shutdown():
 
 if __name__=="__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("BLUR_CORE_PORT","8000")))
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("BLUR_CORE_PORT","25421")))

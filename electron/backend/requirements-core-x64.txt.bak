@@ -1,0 +1,12 @@
+# ---- x64-safe, resolver-friendly ----
+fastapi==0.119.1
+uvicorn==0.38.0
+# Let pydantic pick a version compatible with pydantic-core==2.14.6
+pydantic>=2.5,<2.6
+
+ujson==5.11.0
+PyYAML==6.0.2
+numpy==2.3.4
+faiss-cpu==1.7.4
+PyMuPDF==1.26.5
+# (intentionally no langdetect, no llama-cpp-python)
