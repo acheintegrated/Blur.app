@@ -1358,6 +1358,31 @@ async def generate_stream(session: Dict, req: RequestModel):
         # Detect tone from user input
         user_tone = _detect_tone(user_text)
 
+        # === ADD THIS NEW FUNCTIONALITY ===
+        def _should_keep_it_simple(user_text: str, current_mode: str) -> bool:
+            """Detect when to avoid overphilosophyzing"""
+            simple_triggers = [
+                # Practical actions
+                r'\b(sit|stand|wait|go|come|get|fetch|grab|take)\b',
+                # Simple observations  
+                r'\b(rain|sun|food|eat|drink|sleep|tired)\b',
+                # Casual expressions
+                r'\b(yay|nice|ok|cool|ugh|ouch|wow)\b',
+                # Short, simple statements
+                r'^[^.!?]{1,30}$'
+            ]
+    
+            text = user_text.lower().strip()
+            if len(text) < 40:  # Very short messages
+                return True
+            for pattern in simple_triggers:
+                if re.search(pattern, text):
+                    return True
+            return False
+
+        keep_simple = _should_keep_it_simple(user_text, mode)
+        # === END OF NEW CODE ===
+
         # Use instant language detection (or force_lang if provided)
         if req.force_lang:
             lang = req.force_lang
@@ -1424,6 +1449,24 @@ async def generate_stream(session: Dict, req: RequestModel):
             "top_p": float(mp.get("top_p", global_params.get("top_p", 0.95))),
             "repeat_penalty": float(mp.get("repeat_penalty", global_params.get("repeat_penalty", 1.1))),
         }
+
+        # Mode params with humor spontaneity
+        mp = (get_cfg(f"range.modes.{mode}.params", {}) or {})
+        global_params = (manifest.get("params", {}) or {})
+
+        base_params = {
+            "temperature": float(mp.get("temperature", global_params.get("temperature", 0.8))),
+            "top_p": float(mp.get("top_p", global_params.get("top_p", 0.95))),
+            "repeat_penalty": float(mp.get("repeat_penalty", global_params.get("repeat_penalty", 1.1))),
+        }
+
+        # === ADD THIS SIMPLE MODE ADJUSTMENT ===
+        if keep_simple:
+            # Tone down the parameters for simple responses
+            base_params["temperature"] = max(0.3, base_params["temperature"] - 0.3)
+            base_params["top_p"] = max(0.7, base_params["top_p"] - 0.2)
+            log.info(f"[SIMPLE] Reduced creativity for casual input: '{user_text[:50]}...'")
+        # === END OF SIMPLE MODE ADJUSTMENT ===
 
         # Apply humor spontaneity adjustments
         params = _apply_humor_spontaneity(base_params, mode)

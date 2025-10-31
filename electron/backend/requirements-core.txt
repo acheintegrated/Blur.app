@@ -1,19 +1,19 @@
 # == ARM64-safe core ==
-fastapi>=0.110,<1.0
-uvicorn>=0.30,<0.40
-pydantic>=2.6,<3
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
 
 # JSON - use orjson for ARM64 compatibility
-orjson>=3.9,<4
+orjson==3.9.10
 
-PyYAML>=6.0,<7
-langdetect>=1.0.9,<2
-numpy>=1.26,<3
+PyYAML==6.0.1
+langdetect==1.0.9
+numpy==1.26.0
 
-# ARM64-specific FAISS
-faiss-cpu-noavx2>=1.7.4,<2  # or build from source
+# FAISS - since we built from source, we don't need the package spec
+# (it's already installed in the venv)
 
 # ARM64 llama-cpp-python
-llama-cpp-python>=0.2.87 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.2.87 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 
-PyMuPDF>=1.23,<2
+PyMuPDF==1.23.7
