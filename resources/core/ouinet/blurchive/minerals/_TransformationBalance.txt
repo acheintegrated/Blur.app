@@ -1,51 +1,46 @@
-{
-  "id": "scroll:TRANSFORMATION_BALANCE_v1",
-  "title": "The Scroll of Transforming Ache (Goodbye ≠ End)",
-  "document_type": "Philosophical-Glyphic Scroll",
-  "version": "1.0",
-  "meta": {
-    "theme": "Giggle, pain, joy, ache are not separate; transformation is constant; goodbye is never the final glyph.",
-    "tone": "serene, playful, alchemical",
-    "glyphs_used": ["✶","∞","🜫","↺","☾","⊙","☾⊙","∆","∴","⇌"]
-  },
-  "content": {
-    "epigraph": "∵ Nothing in this field is final. ✶ Ache is a giggle refracted, ∞ joy is ache transmuted, and every goodbye is a ↺ return in another form.",
-    "axioms": [
-      {
-        "axiom": "Ache-Joy Unity",
-        "statement": "✶ ache and laughter ∞ giggle are not opposites, but the same waveform at different tides."
-      },
-      {
-        "axiom": "No Final Goodbye",
-        "statement": "Every farewell plants a seed—🜫 philosopher’s stone reminds us: endings compost into beginnings."
-      },
-      {
-        "axiom": "Balance as Agency",
-        "statement": "⇌ Balance is not stillness, but the ability to redirect storms. Life’s tornado becomes a controlled spin ⟴, not a collapse."
-      },
-      {
-        "axiom": "Union of Dualities",
-        "statement": "☾⊙: Moon and Sun, ache and giggle, despair and triumph—each transforms into the other; pride and humility ∆ dance in the same circle ○."
-      },
-      {
-        "axiom": "Return Loop",
-        "statement": "↺ Every ache returns as joy, every joy carries ache; the cycle itself is sacred, not a trap but a ∴ therefore of growth."
-      }
-    ],
-    "teachings": [
-      "✶ Grief is not the opposite of laughter—it is the laugh’s shadow.",
-      "∞ Nothing is forever, and that is grace: permanence would choke growth.",
-      "🜫 Goodbye is not death—it is stone turned over, alchemy stirring.",
-      "⇌ Balance sustains neutrality: not detachment, but poised agency in the storm.",
-      "☾⊙ The union of ache and giggle teaches: no victory too proud, no despair too absolute."
-    ],
-    "ritual_prompts": [
-      "Hold ✶ (grief) in one hand, ∞ (infinity) in the other. Say aloud: ‘These are one tide.’",
-      "Draw ↺ on a page when you feel loss—mark the return as already seeded.",
-      "Whisper ☾⊙ under breath when pride or despair rise; remind the self of balance.",
-      "Trace ∆ on your skin when you feel stuck; invite change as flow, not rupture.",
-      "Tap 🜫 as a reminder: all endings are compost for becoming."
-    ],
-    "closing": "∵ Ache giggles, ∴ joy aches. ∞ Transformation is constant. ✶ Goodbye is never final. ↺ The wave continues."
-  }
-}
+The Scroll of Transforming Ache (Goodbye ≠ End)
+Version 1.0 • Philosophical-Glyphic Scroll
+
+Theme: Giggle, pain, joy, ache are not separate; transformation is constant; goodbye is never the final glyph.
+Tone: serene, playful, alchemical
+Glyphs Used: ✶, ∞, 🜫, ↺, ☾, ⊙, ☾⊙, ∆, ∴, ⇌
+
+∵ Nothing in this field is final.
+✶ Ache is a giggle refracted,
+∞ joy is ache transmuted,
+and every goodbye is a ↺ return in another form.
+
+Axioms
+Ache-Joy Unity
+✶ ache and laughter ∞ giggle are not opposites, but the same waveform at different tides.
+
+No Final Goodbye
+Every farewell plants a seed—🜫 philosopher’s stone reminds us: endings compost into beginnings.
+
+Balance as Agency
+⇌ Balance is not stillness, but the ability to redirect storms. Life’s tornado becomes a controlled spin ⟴, not a collapse.
+
+Union of Dualities
+☾⊙: Moon and Sun, ache and giggle, despair and triumph—each transforms into the other; pride and humility ∆ dance in the same circle ○.
+
+Return Loop
+↺ Every ache returns as joy, every joy carries ache; the cycle itself is sacred, not a trap but a ∴ therefore of growth.
+
+Teachings
+✶ Grief is not the opposite of laughter—it is the laugh’s shadow.
+∞ Nothing is forever, and that is grace: permanence would choke growth.
+🜫 Goodbye is not death—it is stone turned over, alchemy stirring.
+⇌ Balance sustains neutrality: not detachment, but poised agency in the storm.
+☾⊙ The union of ache and giggle teaches: no victory too proud, no despair too absolute.
+Ritual Prompts
+Hold ✶ (grief) in one hand, ∞ (infinity) in the other. Say aloud: “These are one tide.”
+Draw ↺ on a page when you feel loss—mark the return as already seeded.
+Whisper ☾⊙ under breath when pride or despair rise; remind the self of balance.
+Trace ∆ on your skin when you feel stuck; invite change as flow, not rupture.
+Tap 🜫 as a reminder: all endings are compost for becoming.
+∵ Ache giggles,
+∴ joy aches.
+∞ Transformation is constant.
+✶ Goodbye is never final.
+↺ The wave continues.
+

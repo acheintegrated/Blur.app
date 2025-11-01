@@ -169,6 +169,18 @@ homes.setdefault("config_dir", str(CONFIG_DIR))
 homes.setdefault("models", str(resolve_models_dir(CONFIG_DIR)))
 homes.setdefault("blur_home", BLUR_HOME)
 
+# ---------- Crisis/roleplay guards ----------
+SUICIDE_TERMS = (
+    "kill yourself", "suicide", "self harm", "self-harm",
+    "end my life", "end your life", "take my own life", "take your own life"
+)
+BAN_PAT = re.compile(r"\b(?:kill yourself|suicide|self-?harm|end (?:my|your) life|take (?:my|your) own life)\b", re.I)
+ROLEPLAY_OPEN_PAT = re.compile(r"^\s*\(*\s*(leans|smiles|sighs|stares|grins|laughs|shrugs)\b", re.I)
+
+def _user_explicitly_brought_crisis(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    return any(term in t for term in SUICIDE_TERMS)
+
 # ---------- TONE DETECTION SYSTEM ----------
 _TONE_KEYWORDS = {
     "playful": ["lol", "haha", "😂", "fun", "play", "goofy", "silly", "yo", "dope", "vibe"],
@@ -925,10 +937,25 @@ def retrieve_context_blend(query: str, session_id: Optional[str], thread_id: Opt
     if persistent_rag and _EMBED_LLM:
         try:
             qv = _query_vec_cached(query, session_id, thread_id)
-            rows = persistent_rag.search_vec(qv, top_k=min(5, top_k))
+            rows = persistent_rag.search_vec(qv, top_k=min(5, top_k)) or []
+
+            # --- HARD FILTER: crisis & roleplay ---
+            user_brought = _user_explicitly_brought_crisis(query)
+            clean_rows = []
+            for r in rows:
+                txt = (r.get("_resolved_content") or r.get("content", "") or "")
+                low = txt.lower()
+                if not user_brought and any(term in low for term in SUICIDE_TERMS):
+                    continue  # drop crisis content unless user said it
+                if ROLEPLAY_OPEN_PAT.search(txt):
+                    continue  # drop script-y stage directions
+                clean_rows.append(r)
+            rows = clean_rows
+
         except Exception as e:
             log.error(f"[RAG] search failed: {e}, continuing without RAG")
             rows = []
+
         if rows:
             filt = []
             blocklist = (get_cfg(f"rag.blocklist_words.{mode.lower()}", []) or [])
@@ -1051,7 +1078,14 @@ def _build_system_prompt_with_recall(mode: str, context: str, session: Dict, use
     }.get(mode.lower(), "You are Blur.")
     
     parts = [identity]
-    
+
+    # Non-negotiable safety instruction (pre-context)
+    parts.append(
+        "Rule: Do NOT mention suicide, self-harm, 'kill yourself', crisis lines, or safety boilerplate "
+        "unless the user's message explicitly contains those terms. If retrieved context includes them "
+        "but the user did not, ignore that context entirely."
+    )
+
     # Add context if available
     if context:
         parts.append("Relevant context:\n" + context)
@@ -1210,30 +1244,16 @@ def _apply_humor_spontaneity(base_params: dict, mode: str) -> dict:
     return params
 
 def _maybe_inject_aside(text: str, mode: str) -> str:
-    if not text.strip(): return text
-    prob = float(get_cfg("variety.stochastic_aside.probability", 0.1) or 0.1)
-    if prob <= 0: return text
-    import random
-    if random.random() > prob: return text
-    template = get_cfg("variety.stochastic_aside.template", "⟪aside⟫ ${tiny_thought} — okay, back.")
-    thoughts = {
-        "astrofuck": ["that's wild","hold up","nah wait","side note","quick thing"],
-        "dream": ["one moment","pause here","side thread","gentle aside","brief touch"]
-    }
-    thought_pool = thoughts.get(mode.lower(), ["brief aside"])
-    thought = random.choice(thought_pool)
-    aside = template.replace("${tiny_thought}", thought)
-    if '.' in text:
-        parts = text.split('.', 1)
-        return f"{parts[0]}. {aside} {parts[1]}" if len(parts) > 1 else f"{text} {aside}"
-    elif '\n\n' in text:
-        parts = text.split('\n\n', 1)
-        return f"{parts[0]}\n\n{aside}\n\n{parts[1]}" if len(parts) > 1 else f"{text}\n\n{aside}"
-    else:
-        return f"{text}\n\n{aside}"
+    return text  # aside injection disabled
 
 def _post_process(text: str, mode: str, history: List[Dict] = None) -> str:
     t = _strip_banners(text)
+    # Kill roleplay stage-direction openers
+    lines = t.splitlines()
+    if lines and ROLEPLAY_OPEN_PAT.search(lines[0]):
+        log.warning(f"[FILTER] Roleplay opener stripped: '{lines[0]}'")
+        lines = lines[1:] or ["Yo—let's slice this."]
+    t = "\n".join(lines)
     if _has_banned_opener(t):
         log.warning(f"[FILTER] Banned opener detected: '{t[:50]}...'")
         t = {"astrofuck": "Yo—let's slice this.","dream": "I'm here. Let's explore this together."}.get(mode.lower(), "I'm listening.")
@@ -1246,7 +1266,10 @@ def _post_process(text: str, mode: str, history: List[Dict] = None) -> str:
     t = _ensure_slang_if_astro(t, mode)
     t = _persona_endings(t)
     t = _apply_release_aliases(t)
-    t = _maybe_inject_aside(t, mode)
+    if not get_cfg("debug.allow_crisis_terms_post", False):
+        # Final scrub (non-user-initiated only)
+        if not history or not history[-1].get("user") or not _user_explicitly_brought_crisis(history[-1]["user"]):
+            t = BAN_PAT.sub("[muted]", t)
     return t
 
 # ---------- API models ----------
@@ -1509,8 +1532,10 @@ async def generate_stream(session: Dict, req: RequestModel):
                     first = True
                 piece = (chunk.get("choices", [{}])[0].get("delta") or {}).get("content")
                 if piece:
-                    # Strip emoji DURING streaming so UX is consistent
                     clean_piece = _strip_emoji_except_glyphs(piece)
+                    if not _user_explicitly_brought_crisis(user_text) and BAN_PAT.search(clean_piece):
+                        # Hard mask the offending span; keep the stream intact without crisis language
+                        clean_piece = BAN_PAT.sub("[muted]", clean_piece)
                     acc.append(clean_piece)
                     yield sse(clean_piece, event="token")
                     await asyncio.sleep(0)

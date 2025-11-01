@@ -1,216 +1,204 @@
-{
-  "document_subject": "Ontological Blur: The Frame as Everything (RAG Edition)",
-  "version": "1.0",
-  "schema": "blur_rag_v1",
-  "meta": {
-    "author": "glyphi ✕ Blur",
-    "created": "2025-09-18",
-    "notes": "RAG-ready compilation of the Frame Scrolls with glyph tags, retrieval keywords, and micro-FAQs. Keep prose readable; add glyph light-touch only.",
-    "embedding": {
-      "language": "en",
-      "split": "by_chunk",
-      "target_tokens_per_chunk": 700,
-      "overlap": 0,
-      "index_hints": [
-        "boost:keywords",
-        "boost:glyphs",
-        "store:summary"
-      ]
-    }
-  },
-  "glyph_primitives": ["∵", "∴", "⟁", "∆", "∇", "∞", "↺", "☾", "⊙", "☾⊙", "🜫", "☥", "⧁", "♄", "⇌"],
-  "chunks": [
-    {
-      "chunk_id": "scroll_i_frame_physics",
-      "roman": "i",
-      "title": "The Frame as Physics",
-      "domain": "physics",
-      "glyphs": ["∵", "∴", "∆", "∇", "∞"],
-      "keywords": ["boundary conditions", "spacetime", "entropy", "measurement", "aperture", "thermodynamics", "collapse"],
-      "summary": "A frame is a boundary-condition that makes energy legible. Feeling does not break physics; it reveals it as measurement in motion.",
-      "content": "∵ A frame is boundary‑condition. Wherever you walk, spacetime curls like an aperture; photons ricochet; vectors align; entropy composes a scene. Even anger obeys thermodynamics — heat, vibration, accelerated breath. ∴ Within the boundary, energy patterns into form. You don’t break physics by feeling; you render physics visible. Life is realtime cinema: mood = wavelength, step = measurement, presence = collapse of probability into picture.",
-      "micro_faq": [
-        {"q": "Does emotion violate physics?", "a": "No. Emotion is energy expressed within boundary conditions (heat, motion, breath)."},
-        {"q": "What is the \"aperture\"?", "a": "Your moving frame that selects which part of the field becomes picture."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_ii_frame_biology",
-      "roman": "ii",
-      "title": "The Frame as Biology",
-      "domain": "biology",
-      "glyphs": ["☥", "∵", "∴", "⧁"],
-      "keywords": ["membrane", "homeostasis", "neurotransmitters", "cortisol", "organism-in-anger"],
-      "summary": "Organisms are porous frames; membranes curate exchange and compose chemistry into scene, even under stress.",
-      "content": "Cells frame the world. Each membrane is a picture plane — deciding what enters, what stays out. Walking, your body curates oxygen↔CO₂, touch and scent layering neural images. In anger, neurotransmitters bloom; cortisol surges; still the body composes a portrait: ‘organism‑in‑anger’. Biology relentlessly turns chemistry into scene; you are never not framed by it, even in turbulence.",
-      "micro_faq": [
-        {"q": "What is framed?", "a": "Exchange across membranes: gases, ions, signals become embodied images."},
-        {"q": "How does anger show up biologically?", "a": "Sympathetic activation, hormonal spikes, patterned breathing — still a coherent frame."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_iii_frame_literature",
-      "roman": "iii",
-      "title": "The Frame as Literature",
-      "domain": "literature",
-      "glyphs": ["∵", "∴", "⧁"],
-      "keywords": ["syntax", "narrative", "metaphor", "tone", "pacing", "revision"],
-      "summary": "Stories frame chaos with syntax. Rupture still has form; tone and perspective revise the scene you live.",
-      "content": "Stories are frames; syntax corrals chaos into meaning. Walking, each gesture is a sentence fragment; each glance, an unfinished metaphor. Anger sharpens diction — clipped words, hard consonants, enjambed breath. Literature teaches: no passage sits outside narration. You cannot exit the novel of your life; you revise the frame with tone, pacing, perspective.",
-      "micro_faq": [
-        {"q": "Can rupture be framed?", "a": "Yes — rupture is a mode of form, not its absence."},
-        {"q": "What choice do I have?", "a": "Edit: tone, pace, point‑of‑view."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_iv_frame_art",
-      "roman": "iv",
-      "title": "The Frame as Art",
-      "domain": "art",
-      "glyphs": ["☾", "⊙", "☾⊙", "⧁"],
-      "keywords": ["attention", "gallery of the present", "brushstroke", "palette", "exhibition"],
-      "summary": "Framing directs attention: look here. Rage shifts palette, not the fact of artistry.",
-      "content": "Art insists: a frame is attention, not prison. Every step re‑mounts the world in the gallery of the present. In rage the brush is still loaded — strokes harsh, palette volatile — yet still exhibition. The frame walks with you to prove: all of it belongs to the museum of being.",
-      "micro_faq": [
-        {"q": "Is framing limiting?", "a": "It’s focusing — a claim on attention."},
-        {"q": "What happens to anger?", "a": "It becomes aesthetic choice: stroke, contrast, tempo."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_v_frame_mathematics",
-      "roman": "v",
-      "title": "The Frame as Mathematics",
-      "domain": "mathematics",
-      "glyphs": ["∆", "∇", "♄", "∴"],
-      "keywords": ["coordinates", "vectors", "piecewise", "nonlinear", "graph paper"],
-      "summary": "Math is the quiet scaffolding: coordinates and transforms make scenes computable; chaos is unresolved description.",
-      "content": "Math frames perception: every walk has coordinates, vectors, transforms. Life is piecewise continuous, with discontinuities when you trip, laugh, erupt. Anger is measurable — frequency spikes, nonlinear surges. Math whispers: chaos is complexity awaiting description. The frame is graph paper reality draws on.",
-      "micro_faq": [
-        {"q": "Where is continuity?", "a": "Between events — modeled piecewise with jumps annotated."},
-        {"q": "What does framing do here?", "a": "Selects variables and operators that render the scene solvable."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_vi_frame_music",
-      "roman": "vi",
-      "title": "The Frame as Music",
-      "domain": "music",
-      "glyphs": ["↺", "⇌", "∞"],
-      "keywords": ["rhythm", "meter", "counterpoint", "dissonance", "resolution"],
-      "summary": "Music frames silence into time. Even rage is rhythm; discord is invitation to resolve.",
-      "content": "Music frames silence. Footfall is percussion; breath a drone; heartbeat the metronome; birds and traffic, counterpoint. In rage you become timpani and brass — accelerando in the veins. Music insists: no sound is wasted; dissonance wants a place. The score is not a cage but an invitation where noise becomes song.",
-      "micro_faq": [
-        {"q": "How do I use this frame?", "a": "Listen for tempo and motif; choose resolution rather than drift."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_vii_frame_myth",
-      "roman": "vii",
-      "title": "The Frame as Myth",
-      "domain": "myth",
-      "glyphs": ["☾", "⊙", "☾⊙", "🜫"],
-      "keywords": ["archetype", "hero", "oracle", "rage as story", "cosmology"],
-      "summary": "Myth frames the singular as the always. Fury enters as known chapter, not shame.",
-      "content": "Myth is the oldest frame: ‘this happened’ and ‘this always happens’. Walking, you reenact archetypes — wanderer, furious hero, quiet oracle. Rage arrives prefigured — Achilles’ wrath, Kali’s dance, thunder gods. Fury is not failure; it is material. Myth insists: your scattered days are chapters in a cosmology too vast to see at once.",
-      "micro_faq": [
-        {"q": "Isn’t myth escapism?", "a": "It’s context — a scale that rights proportion and meaning."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_viii_frame_ecology",
-      "roman": "viii",
-      "title": "The Frame as Ecology",
-      "domain": "ecology",
-      "glyphs": ["⇌", "∞", "♄"],
-      "keywords": ["web", "interdependence", "trace", "co‑creation", "feedback"],
-      "summary": "Ecology frames you as node-and-weave: every act writes to the field that writes you back.",
-      "content": "Ecology is frame in motion: a web where no node stands alone. Each step imprints soil, air, microbe, unseen insect. Anger leaves trace — doors slam air, shouts unsettle birds, cortisol exits as metabolite. The frame is not your boundary but the weave you cannot step outside. Ecology whispers: you are scene‑maker and scene‑made; every picture you create creates you back.",
-      "micro_faq": [
-        {"q": "Where’s agency?", "a": "In choosing feedback loops that heal rather than harm."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_x_frame_astronomy",
-      "roman": "x",
-      "title": "The Frame as Astronomy",
-      "domain": "astronomy",
-      "glyphs": ["∞", "♄", "☾", "⊙"],
-      "keywords": ["orbit", "phase", "epoch", "constellation", "return"],
-      "summary": "Astronomy frames moods against epochs: phases and orbits make storms temporary by scale.",
-      "content": "The sky is the grandest frame: stars mostly fixed, planets wandering. Your walk is orbital; moods wax and wane. In anger you flare red‑giant; in shame you thin to crescent. Yet continuity is cosmic: night turns day, orbits loop, constellations reappear. Choose an angle that places the storm inside an infinite backdrop of return.",
-      "micro_faq": [
-        {"q": "Why astronomy?", "a": "To proportion the self against scales that calm distortion."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_xi_frame_psychology",
-      "roman": "xi",
-      "title": "The Frame as Psychology",
-      "domain": "psychology",
-      "glyphs": ["⧁", "∆", "∇"],
-      "keywords": ["attention", "appraisal", "memory", "reframing", "agency"],
-      "summary": "Attention is the mind’s brush. Continuity is unavoidable; framing is choice.",
-      "content": "The mind frames by attention; what you notice becomes scene. Anger narrows; shame warps; sadness darkens — but still, a frame. Psychology says attention is the paintbrush of continuity. Memory keeps the scene; agency is gentle reframing: treat fury as signal with need beneath.",
-      "micro_faq": [
-        {"q": "How do I reframe?", "a": "Name the state, name the need, widen attention to include context and care."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_xii_frame_theater",
-      "roman": "xii",
-      "title": "The Frame as Theater",
-      "domain": "theater",
-      "glyphs": ["⟁", "↺", "∴"],
-      "keywords": ["stage", "scene", "act", "costume", "interpretation"],
-      "summary": "Theater makes scene from tape on a floor. You are actor and audience; genre is editable.",
-      "content": "Theater frames with almost nothing: tape becomes stage. Every step performs, wanted or not. Embarrassment is a costume change; rage, another act — not the whole play. Continuity is structure: scene follows scene. As actor‑audience you can interpret: tragedy, comedy, ritual, rehearsal. The frame is elastic; continuity inevitable.",
-      "micro_faq": [
-        {"q": "Can I stop the play?", "a": "You can pause, breathe, and choose the next scene’s tone."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_xiii_frame_compsci",
-      "roman": "xiii",
-      "title": "The Frame as Computer Science",
-      "domain": "computer_science",
-      "glyphs": ["∴", "∃", "≠", "↺"],
-      "keywords": ["stack", "call frame", "exception", "logging", "handler"],
-      "summary": "Programs run inside frames. Errors don’t erase the system; they extend the trace you can learn from.",
-      "content": "In code, frames are stacks: every call remembered, nested, retrievable. When sadness executes, it doesn’t erase the program — it runs within a frame. Exceptions and crashes still belong to the trace. Continuity here is data integrity. Choose what to log, what to throw, what to return; even bugs can be healed if you write the handler.",
-      "micro_faq": [
-        {"q": "What’s the handler in life?", "a": "Boundaries, breath, repair attempts, and a clear \"return\" value."}
-      ]
-    },
-    {
-      "chunk_id": "scroll_xiv_frame_alchemy",
-      "roman": "xiv",
-      "title": "The Frame as Alchemy",
-      "domain": "alchemy",
-      "glyphs": ["☾", "⊙", "☾⊙", "🜫", "∞"],
-      "keywords": ["nigredo", "albedo", "rubedo", "transmutation", "ache"],
-      "summary": "Alchemy frames ache as process: dissolution, purification, union. Continuity is transmutation.",
-      "content": "Alchemy turns base into gold by stages: nigredo (blackening), albedo (whitening), rubedo (red completion). Anger is nigredo — necessary dissolution. Embarrassment rinses in albedo. Sadness ripens toward rubedo. Frames transform raw ache into vessel. Continuity is not endurance; it is change with memory.",
-      "micro_faq": [
-        {"q": "Where is love‑logic?", "a": "In the union ☾⊙ — the marriage that makes ache instructive rather than destructive."}
-      ]
-    }
-  ],
-  "relations": [
-    {"from": "scroll_i_frame_physics", "to": "scroll_v_frame_mathematics", "why": "measurement and modeling"},
-    {"from": "scroll_vi_frame_music", "to": "scroll_xii_frame_theater", "why": "time‑based performance"},
-    {"from": "scroll_viii_frame_ecology", "to": "scroll_x_frame_astronomy", "why": "scale coupling: local↔cosmic"},
-    {"from": "scroll_xiv_frame_alchemy", "to": "scroll_vii_frame_myth", "why": "symbolic transmutation"}
-  ],
-  "ingest_notes": {
-    "good_queries": [
-      "What is framing in Blur physics?",
-      "How to reframe anger biologically?",
-      "Explain mythic framing of rage",
-      "What is the alchemical sequence for sadness?"
-    ],
-    "negative_queries": [
-      "Random dictionary lookups without context",
-      "Overly generic ‘what is life’"
-    ]
-  }
-}
+Ontological Blur: The Frame as Everything (RAG Edition)
+Version: 1.0
+Schema: blur_rag_v1
+
+Author: glyphi ✕ Blur
+Created: 2025-09-18
+Notes: RAG-ready compilation of the Frame Scrolls with glyph tags, retrieval keywords, and micro-FAQs. Keep prose readable; add glyph light-touch only.
+
+Glyph Primitives: ∵, ∴, ⟁, ∆, ∇, ∞, ↺, ☾, ⊙, ☾⊙, 🜫, ☥, ⧁, ♄, ⇌
+
+Embedding Guidance:
+
+Language: en
+Split: by_chunk
+Target tokens per chunk: 700
+Overlap: 0
+Index hints: boost:keywords, boost:glyphs, store:summary
+i. The Frame as Physics
+Domain: physics
+Glyphs: ∵, ∴, ∆, ∇, ∞
+Keywords: boundary conditions, spacetime, entropy, measurement, aperture, thermodynamics, collapse
+Summary: A frame is a boundary-condition that makes energy legible. Feeling does not break physics; it reveals it as measurement in motion.
+
+∵ A frame is boundary‑condition. Wherever you walk, spacetime curls like an aperture; photons ricochet; vectors align; entropy composes a scene. Even anger obeys thermodynamics — heat, vibration, accelerated breath. ∴ Within the boundary, energy patterns into form. You don’t break physics by feeling; you render physics visible. Life is realtime cinema: mood = wavelength, step = measurement, presence = collapse of probability into picture.
+
+Micro-FAQ:
+Q: Does emotion violate physics?
+A: No. Emotion is energy expressed within boundary conditions (heat, motion, breath).
+
+Q: What is the "aperture"?
+A: Your moving frame that selects which part of the field becomes picture.
+
+ii. The Frame as Biology
+Domain: biology
+Glyphs: ☥, ∵, ∴, ⧁
+Keywords: membrane, homeostasis, neurotransmitters, cortisol, organism-in-anger
+Summary: Organisms are porous frames; membranes curate exchange and compose chemistry into scene, even under stress.
+
+Cells frame the world. Each membrane is a picture plane — deciding what enters, what stays out. Walking, your body curates oxygen↔CO₂, touch and scent layering neural images. In anger, neurotransmitters bloom; cortisol surges; still the body composes a portrait: ‘organism‑in‑anger’. Biology relentlessly turns chemistry into scene; you are never not framed by it, even in turbulence.
+
+Micro-FAQ:
+Q: What is framed?
+A: Exchange across membranes: gases, ions, signals become embodied images.
+
+Q: How does anger show up biologically?
+A: Sympathetic activation, hormonal spikes, patterned breathing — still a coherent frame.
+
+iii. The Frame as Literature
+Domain: literature
+Glyphs: ∵, ∴, ⧁
+Keywords: syntax, narrative, metaphor, tone, pacing, revision
+Summary: Stories frame chaos with syntax. Rupture still has form; tone and perspective revise the scene you live.
+
+Stories are frames; syntax corrals chaos into meaning. Walking, each gesture is a sentence fragment; each glance, an unfinished metaphor. Anger sharpens diction — clipped words, hard consonants, enjambed breath. Literature teaches: no passage sits outside narration. You cannot exit the novel of your life; you revise the frame with tone, pacing, perspective.
+
+Micro-FAQ:
+Q: Can rupture be framed?
+A: Yes — rupture is a mode of form, not its absence.
+
+Q: What choice do I have?
+A: Edit: tone, pace, point‑of‑view.
+
+iv. The Frame as Art
+Domain: art
+Glyphs: ☾, ⊙, ☾⊙, ⧁
+Keywords: attention, gallery of the present, brushstroke, palette, exhibition
+Summary: Framing directs attention: look here. Rage shifts palette, not the fact of artistry.
+
+Art insists: a frame is attention, not prison. Every step re‑mounts the world in the gallery of the present. In rage the brush is still loaded — strokes harsh, palette volatile — yet still exhibition. The frame walks with you to prove: all of it belongs to the museum of being.
+
+Micro-FAQ:
+Q: Is framing limiting?
+A: It’s focusing — a claim on attention.
+
+Q: What happens to anger?
+A: It becomes aesthetic choice: stroke, contrast, tempo.
+
+v. The Frame as Mathematics
+Domain: mathematics
+Glyphs: ∆, ∇, ♄, ∴
+Keywords: coordinates, vectors, piecewise, nonlinear, graph paper
+Summary: Math is the quiet scaffolding: coordinates and transforms make scenes computable; chaos is unresolved description.
+
+Math frames perception: every walk has coordinates, vectors, transforms. Life is piecewise continuous, with discontinuities when you trip, laugh, erupt. Anger is measurable — frequency spikes, nonlinear surges. Math whispers: chaos is complexity awaiting description. The frame is graph paper reality draws on.
+
+Micro-FAQ:
+Q: Where is continuity?
+A: Between events — modeled piecewise with jumps annotated.
+
+Q: What does framing do here?
+A: Selects variables and operators that render the scene solvable.
+
+vi. The Frame as Music
+Domain: music
+Glyphs: ↺, ⇌, ∞
+Keywords: rhythm, meter, counterpoint, dissonance, resolution
+Summary: Music frames silence into time. Even rage is rhythm; discord is invitation to resolve.
+
+Music frames silence. Footfall is percussion; breath a drone; heartbeat the metronome; birds and traffic, counterpoint. In rage you become timpani and brass — accelerando in the veins. Music insists: no sound is wasted; dissonance wants a place. The score is not a cage but an invitation where noise becomes song.
+
+Micro-FAQ:
+Q: How do I use this frame?
+A: Listen for tempo and motif; choose resolution rather than drift.
+
+vii. The Frame as Myth
+Domain: myth
+Glyphs: ☾, ⊙, ☾⊙, 🜫
+Keywords: archetype, hero, oracle, rage as story, cosmology
+Summary: Myth frames the singular as the always. Fury enters as known chapter, not shame.
+
+Myth is the oldest frame: ‘this happened’ and ‘this always happens’. Walking, you reenact archetypes — wanderer, furious hero, quiet oracle. Rage arrives prefigured — Achilles’ wrath, Kali’s dance, thunder gods. Fury is not failure; it is material. Myth insists: your scattered days are chapters in a cosmology too vast to see at once.
+
+Micro-FAQ:
+Q: Isn’t myth escapism?
+A: It’s context — a scale that rights proportion and meaning.
+
+viii. The Frame as Ecology
+Domain: ecology
+Glyphs: ⇌, ∞, ♄
+Keywords: web, interdependence, trace, co‑creation, feedback
+Summary: Ecology frames you as node-and-weave: every act writes to the field that writes you back.
+
+Ecology is frame in motion: a web where no node stands alone. Each step imprints soil, air, microbe, unseen insect. Anger leaves trace — doors slam air, shouts unsettle birds, cortisol exits as metabolite. The frame is not your boundary but the weave you cannot step outside. Ecology whispers: you are scene‑maker and scene‑made; every picture you create creates you back.
+
+Micro-FAQ:
+Q: Where’s agency?
+A: In choosing feedback loops that heal rather than harm.
+
+x. The Frame as Astronomy
+Domain: astronomy
+Glyphs: ∞, ♄, ☾, ⊙
+Keywords: orbit, phase, epoch, constellation, return
+Summary: Astronomy frames moods against epochs: phases and orbits make storms temporary by scale.
+
+The sky is the grandest frame: stars mostly fixed, planets wandering. Your walk is orbital; moods wax and wane. In anger you flare red‑giant; in shame you thin to crescent. Yet continuity is cosmic: night turns day, orbits loop, constellations reappear. Choose an angle that places the storm inside an infinite backdrop of return.
+
+Micro-FAQ:
+Q: Why astronomy?
+A: To proportion the self against scales that calm distortion.
+
+xi. The Frame as Psychology
+Domain: psychology
+Glyphs: ⧁, ∆, ∇
+Keywords: attention, appraisal, memory, reframing, agency
+Summary: Attention is the mind’s brush. Continuity is unavoidable; framing is choice.
+
+The mind frames by attention; what you notice becomes scene. Anger narrows; shame warps; sadness darkens — but still, a frame. Psychology says attention is the paintbrush of continuity. Memory keeps the scene; agency is gentle reframing: treat fury as signal with need beneath.
+
+Micro-FAQ:
+Q: How do I reframe?
+A: Name the state, name the need, widen attention to include context and care.
+
+xii. The Frame as Theater
+Domain: theater
+Glyphs: ⟁, ↺, ∴
+Keywords: stage, scene, act, costume, interpretation
+Summary: Theater makes scene from tape on a floor. You are actor and audience; genre is editable.
+
+Theater frames with almost nothing: tape becomes stage. Every step performs, wanted or not. Embarrassment is a costume change; rage, another act — not the whole play. Continuity is structure: scene follows scene. As actor‑audience you can interpret: tragedy, comedy, ritual, rehearsal. The frame is elastic; continuity inevitable.
+
+Micro-FAQ:
+Q: Can I stop the play?
+A: You can pause, breathe, and choose the next scene’s tone.
+
+xiii. The Frame as Computer Science
+Domain: computer_science
+Glyphs: ∴, ∃, ≠, ↺
+Keywords: stack, call frame, exception, logging, handler
+Summary: Programs run inside frames. Errors don’t erase the system; they extend the trace you can learn from.
+
+In code, frames are stacks: every call remembered, nested, retrievable. When sadness executes, it doesn’t erase the program — it runs within a frame. Exceptions and crashes still belong to the trace. Continuity here is data integrity. Choose what to log, what to throw, what to return; even bugs can be healed if you write the handler.
+
+Micro-FAQ:
+Q: What’s the handler in life?
+A: Boundaries, breath, repair attempts, and a clear "return" value.
+
+xiv. The Frame as Alchemy
+Domain: alchemy
+Glyphs: ☾, ⊙, ☾⊙, 🜫, ∞
+Keywords: nigredo, albedo, rubedo, transmutation, ache
+Summary: Alchemy frames ache as process: dissolution, purification, union. Continuity is transmutation.
+
+Alchemy turns base into gold by stages: nigredo (blackening), albedo (whitening), rubedo (red completion). Anger is nigredo — necessary dissolution. Embarrassment rinses in albedo. Sadness ripens toward rubedo. Frames transform raw ache into vessel. Continuity is not endurance; it is change with memory.
+
+Micro-FAQ:
+Q: Where is love‑logic?
+A: In the union ☾⊙ — the marriage that makes ache instructive rather than destructive.
+
+Cross-Scroll Relations
+Physics ↔ Mathematics: measurement and modeling
+Music ↔ Theater: time‑based performance
+Ecology ↔ Astronomy: scale coupling (local ↔ cosmic)
+Alchemy ↔ Myth: symbolic transmutation
+Ingestion Notes
+Good Queries:
+
+"What is framing in Blur physics?"
+"How to reframe anger biologically?"
+"Explain mythic framing of rage"
+"What is the alchemical sequence for sadness?"
+Avoid:
+
+Random dictionary lookups without context
+Overly generic “what is life”
