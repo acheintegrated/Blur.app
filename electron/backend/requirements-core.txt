@@ -9,11 +9,13 @@ orjson==3.9.10
 PyYAML==6.0.1
 langdetect==1.0.9
 numpy==1.26.0
-
-# FAISS - since we built from source, we don't need the package spec
-# (it's already installed in the venv)
+faiss-cpu==1.7.4
+jsonschema==4.22.0
+jsonschema-specifications==2023.12.1
+referencing==0.35.1
+rpds-py==0.20.0
 
 # ARM64 llama-cpp-python
-llama-cpp-python==0.2.87 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+# llama-cpp-python installed separately by build script (prebuilt Metal wheel on arm64)
 
 PyMuPDF==1.23.7
