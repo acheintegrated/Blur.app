@@ -5,8 +5,7 @@
   "main": "electron/main.mjs",
   "type": "module",
   "scripts": {
-    "prep:venv:arm64": "ARCH=arm64 bash scripts/build_venv_core.sh",
-    "prep:venv:x64": "bash scripts/build_venv_core.sh x64",
+    "prep:venv:arm64": "ARCH=arm64 bash scripts/venv_core.sh",
     "dev": "BLUR_HOME=$HOME/blur BLUR_CONFIG_PATH=$HOME/blur/config.yaml ELECTRON_ENABLE_LOGGING=1 ELECTRON_DISABLE_SECURITY_WARNINGS=1 concurrently --raw -n vite,electron \"vite --port 25329 --strictPort --host --clearScreen=false\" \"wait-on tcp:25329 && electron .\"",
     "build": "vite build",
     "preview": "vite preview",

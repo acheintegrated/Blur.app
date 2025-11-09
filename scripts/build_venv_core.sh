@@ -19,7 +19,7 @@ fi
 TARGET_ARCH="${1:-arm64}"      # hard default: arm64 only
 PY_MINOR="3.11"
 REQ_REL="electron/backend/requirements-core.txt"
-LLAMA_VERSIONS=("0.3.2" "0.3.1" "0.3.0" "0.2.87")
+LLAMA_VERSIONS=("0.3.16" "0.3.15" "0.3.14" "0.3.13" "0.3.12" "0.3.5" "0.3.4")
 LLAMA_EXTRA_INDEX="https://abetlen.github.io/llama-cpp-python/whl/metal"
 PIP_ONLY_BIN=":all:,!langdetect" # refuse sdists, except for pure-Python langdetect
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -210,3 +210,4 @@ for m in mods:
 PY
 
 log "✅ Venv built successfully for ${TARGET_ARCH} at ${VENV_DIR}"
+

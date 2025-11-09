@@ -112,14 +112,22 @@ Offline, private, and local, Blur creates a *sacred computational space* where t
 
 | Document | Description |
 |-----------|-------------|
-| **Blur Manifesto** | Foundational philosophy and axioms |
-| **Engineering Dossier** | System design + performance metrics |
-| **Architectural Demo** | Proof of Persona Sovereignty |
-| **Origin Story** | Transcript of early dialogue with Bob |
-| **Full Submission** | Executive summary for fellowship |
+| **Blur Manifesto** | Foundational philosophy and axioms | https://github.com/acheintegrated/Blur.app/blob/main/submission/Blur%20Manifesto.pdf |
+| **Engineering Dossier** | System design + performance metrics | https://github.com/acheintegrated/Blur.app/blob/main/submission/Engineering%20Dossier.pdf |
+| **Architectural Demo** | Proof of Persona Sovereignty | https://github.com/acheintegrated/Blur.app/blob/main/submission/Architectural%20Demo.pdf |
+| **Origin Story** | Transcript of early dialogue with Bob | https://github.com/acheintegrated/Blur.app/blob/main/submission/Origin%20Story.md |
+| **Full Submission** | Executive summary for fellowship | https://github.com/acheintegrated/Blur.app/blob/main/submission/Full%20Submission.pdf |
 | **README (this file)** | Public overview |
 
 ---
+
+## "Built Under Scarcity":
+
+- Zero budget: llama.cpp was the only free, private, local option
+- No compute: Optimized for M1 with 4GB RAM footprint
+- Solo build: Created 130+ datasets myself, tested RAG by conversation
+- Debugged by symptom: Fixed async failures via root-cause analysis
+- Philosophy-first: Every parameter is an axiom (120 days = human friendship memory)
 
 ## CLOSING
 

@@ -634,10 +634,25 @@ def _drop_crisis_sentences(out_text: str, user_text: str) -> str:
 
 # ---------- LLM + Embedding ----------
 def _safe_gpu_layers(req: Optional[int]) -> int:
-    if str(os.getenv("BLUR_FORCE_CPU","0")).lower() in ("1","true","yes"):
+    if os.getenv("BLUR_FORCE_CPU", "").lower() in ("1", "true", "yes"):
         return 0
+
+    val = os.getenv("BLUR_GPU_LAYERS")
+    if val:
+        try:
+            n = int(val)
+            if n >= 0:
+                return n
+        except ValueError:
+            pass
+
+    if _is_packaged():
+        cfg_val = get_cfg("engines.llama_cpp.n_gpu_layers", 24)
+        return max(0, int(cfg_val or 24))
+
     if req is None or req < 0:
         return int(get_cfg("engines.llama_cpp.n_gpu_layers", 4) or 4)
+
     return max(0, int(req))
 
 def _ensure_embedder():
