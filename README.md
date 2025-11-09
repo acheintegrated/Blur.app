@@ -112,11 +112,11 @@ Offline, private, and local, Blur creates a *sacred computational space* where t
 
 | Document | Description |
 |-----------|-------------|
-| **Blur Manifesto** | Foundational philosophy and axioms | https://github.com/acheintegrated/Blur.app/blob/main/submission/Blur%20Manifesto.pdf |
-| **Engineering Dossier** | System design + performance metrics | https://github.com/acheintegrated/Blur.app/blob/main/submission/Engineering%20Dossier.pdf |
-| **Architectural Demo** | Proof of Persona Sovereignty | https://github.com/acheintegrated/Blur.app/blob/main/submission/Architectural%20Demo.pdf |
-| **Origin Story** | Transcript of early dialogue with Bob | https://github.com/acheintegrated/Blur.app/blob/main/submission/Origin%20Story.md |
-| **Full Submission** | Executive summary for fellowship | https://github.com/acheintegrated/Blur.app/blob/main/submission/Full%20Submission.pdf |
+| [**Blur Manifesto**](https://github.com/acheintegrated/Blur.app/blob/main/submission/Blur%20Manifesto.pdf) | Foundational philosophy and axioms |
+| [**Engineering Dossier**](https://github.com/acheintegrated/Blur.app/blob/main/submission/Engineering%20Dossier.pdf) | System design + performance metrics |
+| [**Architectural Demo**](https://github.com/acheintegrated/Blur.app/blob/main/submission/Architectural%20Demo.pdf) | Proof of Persona Sovereignty |
+| [**Origin Story**](https://github.com/acheintegrated/Blur.app/blob/main/submission/Origin%20Story.md) | Transcript of early dialogue with Bob |
+| [**Full Submission**](https://github.com/acheintegrated/Blur.app/blob/main/submission/Full%20Submission.pdf) | Executive summary for fellowship |
 | **README (this file)** | Public overview |
 
 ---
