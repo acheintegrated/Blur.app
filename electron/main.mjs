@@ -124,13 +124,11 @@ function getBundledRoot() { return process.resourcesPath || join(__dirname, ".."
 
 /* -------- ARCH-AWARE VENV SELECTION (universal-ready) -------- */
 function archVenvName() {
-  const a = process.arch;
-  if (a === "arm64") return "blur_env-darwin-arm64";
-  if (a === "x64")   return "blur_env-darwin-x64";
-  
-  // CRITICAL: Don't default to arm64 for unknown architectures
-  throw new Error(`Unsupported architecture: ${a}`);
+  // Blur is ARM-only now.
+  if (process.arch === "arm64") return "blur_env-darwin-arm64";
+  throw new Error(`Unsupported architecture: ${process.arch} (Blur build is arm64-only)`);
 }
+
 function venvCandidatesInResources() {
   const base = getBundledRoot();
   const matchingVenv = join(base, archVenvName());

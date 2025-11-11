@@ -110,22 +110,58 @@ def _env_first(*keys: str) -> Optional[str]:
     return None
 
 def resolve_config_path() -> Path:
-    # 1) env overrides (support all common names)
+    """
+    Resolve the active manifest path.
+
+    Packaged rules:
+      - If _is_packaged() → hard-pin to bundled Resources/config.(yaml|yml)
+      - Optional escape hatch: BLUR_CONFIG_FORCE (for explicit power-user override)
+      - Do NOT silently fall back to BLUR_HOME in packaged mode.
+
+    Dev rules:
+      - Honor BLUR_CONFIG / CONFIG_PATH / BLUR_CONFIG_PATH if they point to an existing file
+      - Else use Resources/config.(yaml|yml) if present
+      - Else fall back to BLUR_HOME/config.yaml
+    """
+    # --- Packaged: bundle-first, no accidental dev bleed-through ---
+    if _is_packaged():
+        # explicit, opt-in override only
+        force = _env_first("BLUR_CONFIG_FORCE")
+        if force:
+            p = Path(os.path.expanduser(os.path.expandvars(force)))
+            if p.exists():
+                return p
+
+        # bundled config.yaml / config.yml
+        for name in ("config.yaml", "config.yml"):
+            q = RESOURCES_DIR() / name
+            if q.exists():
+                return q
+
+        # In packaged mode, missing bundled config is a real error.
+        raise FileNotFoundError(
+            f"[packaged] bundled config.yaml not found in {RESOURCES_DIR()}"
+        )
+
+    # --- Dev: flexible & override-friendly ---
     envp = _env_first("BLUR_CONFIG", "CONFIG_PATH", "BLUR_CONFIG_PATH")
     if envp:
         p = Path(os.path.expanduser(os.path.expandvars(envp)))
         if p.exists():
             return p
-    # 2) bundled default
+
     for name in ("config.yaml", "config.yml"):
         q = RESOURCES_DIR() / name
         if q.exists():
             return q
-    # 3) legacy home fallback
+
     home_cfg = Path(BLUR_HOME).expanduser() / "config.yaml"
     if home_cfg.exists():
         return home_cfg
-    raise FileNotFoundError(f"config not found (tried env, Resources, {home_cfg})")
+
+    raise FileNotFoundError(
+        f"config not found (tried env overrides, {RESOURCES_DIR()}/config.yaml, {home_cfg})"
+    )
 
 # compute manifest path and config dir early
 try:
